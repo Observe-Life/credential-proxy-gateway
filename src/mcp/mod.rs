@@ -806,10 +806,23 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 pub fn build_http_service(
     state: Arc<AppState>,
 ) -> StreamableHttpService<McpServer, LocalSessionManager> {
+    // rmcp validates the inbound `Host` header and only allows loopback by
+    // default (DNS-rebinding protection). Container-to-container callers reach
+    // this service by container name, so extend that list with hosts named in
+    // `SSH_CONNECTOR_ALLOWED_HOSTS` (comma separated, `host` or `host:port`).
+    // Entries are appended, never substituted, so the loopback defaults stay.
+    let mut config = StreamableHttpServerConfig::default();
+    if let Ok(extra) = std::env::var("SSH_CONNECTOR_ALLOWED_HOSTS") {
+        for host in extra.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+            if !config.allowed_hosts.iter().any(|existing| existing == host) {
+                config.allowed_hosts.push(host.to_string());
+            }
+        }
+    }
     StreamableHttpService::new(
         move || Ok(McpServer::new(state.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     )
 }
 

@@ -510,3 +510,28 @@ http://ssh-connector-mcp:7600/mcp
 ```text
 ghcr.io/observe-life/ssh-connector-mcp:latest
 ```
+
+### 容器间访问 MCP 接口
+
+服务内置 Host 头校验（防 DNS 重绑定），默认只接受 `localhost`、`127.0.0.1`、`::1`。
+其他容器通过容器名访问 `/mcp` 时，需要把该容器名追加进白名单：
+
+```yaml
+environment:
+  SSH_CONNECTOR_BIND_ADDRESS: 0.0.0.0
+  SSH_CONNECTOR_ALLOWED_HOSTS: ssh-connector-mcp
+```
+
+该变量是**追加**而不是替换，原有回环限制仍然生效。多个值用逗号分隔，可写 `host` 或 `host:port`；
+不带端口的条目匹配任意端口。
+
+验证方式（在同一个网桥里另起一个容器）：
+
+```bash
+docker run --rm --network backend curlimages/curl:latest \
+  -s -o /dev/null -w "%{http_code}\n" \
+  -X POST http://ssh-connector-mcp:7600/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}'
+```
