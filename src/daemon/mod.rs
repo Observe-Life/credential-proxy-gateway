@@ -12,7 +12,7 @@ use crate::config::{self, Config};
 use crate::state::AppState;
 use crate::vault::Vault;
 use std::io::BufRead;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -83,7 +83,11 @@ async fn serve_http(state: Arc<AppState>, cfg: &Config, data_dir: &PathBuf) -> a
         .nest_service("/mcp", mcp_service)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, cfg.web_port));
+    let bind_ip = std::env::var("SSH_CONNECTOR_BIND_ADDRESS")
+        .ok()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::from((bind_ip, cfg.web_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("listening on http://{addr}  (web UI + /mcp)");
 

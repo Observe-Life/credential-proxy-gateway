@@ -1,0 +1,28 @@
+services:
+  ssh-connector-mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ghcr.io/observe-life/ssh-connector-mcp:latest
+    container_name: ssh-connector-mcp
+    restart: unless-stopped
+    environment:
+      SSH_CONNECTOR_BIND_ADDRESS: 0.0.0.0
+      RUST_LOG: info
+      # 可选：容器启动时自动解锁已初始化的保险箱。
+      # SSH_CONNECTOR_MASTER_PASSWORD_ENV: SSH_CONNECTOR_MASTER_PASSWORD
+      # SSH_CONNECTOR_MASTER_PASSWORD: 请改成 Docker secret 或其他安全注入方式
+    volumes:
+      - ssh-connector-data:/app/data
+    networks:
+      - backend
+    ports:
+      - "7600:7600"
+
+networks:
+  backend:
+    external: true
+    name: backend
+
+volumes:
+  ssh-connector-data:

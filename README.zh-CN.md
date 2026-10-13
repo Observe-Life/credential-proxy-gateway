@@ -485,3 +485,28 @@ keyboard-interactive、跳板成功和失败、最终目标错误分类、TOFU m
 ## License
 
 MIT
+
+## Docker 部署与容器间访问
+
+本分支提供 Docker 镜像和 GitHub Actions 构建。容器运行时会让服务监听容器内的 `0.0.0.0:7600`；MCP 地址为 `/mcp`。
+
+先创建自建网桥：
+
+```bash
+docker network create backend
+```
+
+然后使用 `deploy/docker-compose.yml` 启动。需要让其他容器访问时，将它们加入同一个 `backend` 网桥，使用服务名访问：
+
+```text
+http://ssh-connector-mcp:7600/
+http://ssh-connector-mcp:7600/mcp
+```
+
+不要在容器 A 中使用 `127.0.0.1:7600` 或 `localhost:7600`；那指向的是容器 A 自己。
+
+数据卷 `/app/data` 保存保险箱、配置和审计记录。请设置强主密码，并保护该数据卷。镜像由 GitHub Actions 发布到：
+
+```text
+ghcr.io/observe-life/ssh-connector-mcp:latest
+```
