@@ -589,6 +589,35 @@ env_file:
 > `[vault_bad_password] decryption failed (wrong key or corrupted vault)`。
 > 不打算自动解锁就不要启用这两项。
 
+## 目标主机的 shell 差异（实测）
+
+`exec` 提供三种载荷，行为不同，选错会直接失败：
+
+| 载荷 | 行为 | 适用 |
+| --- | --- | --- |
+| `argv` | 连接器为每个参数套 POSIX 单引号后交给远端 shell | Linux / macOS 等 POSIX shell |
+| `raw` | 原样交给远端登录 shell，**引号由调用方负责** | Windows（`cmd.exe`）等非 POSIX shell |
+| `script` | 多行脚本，经 SFTP 上传后作为文件执行 | 复杂批处理 |
+
+**Windows 目标（OpenSSH 默认 `cmd.exe`）不要用 `argv`。** 参数会被加上单引号，
+`cmd.exe` 无法识别，命令以退出码 1 失败并提示「不是内部或外部命令」。改用 `raw`：
+
+```json
+{ "host_id": "<host_id>", "raw": "hostname" }
+```
+
+**中文输出要用 PowerShell 显式切到 UTF-8。** 否则远端返回的 GBK 字节会被判定为非法
+UTF-8：结果里 `had_invalid_utf8` 为 `true`，内容显示为乱码。
+
+```json
+{
+  "host_id": "<host_id>",
+  "raw": "powershell -NoProfile -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; hostname\""
+}
+```
+
+此外，`session_open` 等**交互式 PTY 是 POSIX 专用**；Windows 目标请使用 one-shot 命令。
+
 ## 容器化后的安全须知
 
 - **MCP 接口与 Web API 都没有鉴权**（上游设计假定只在本机回环使用）。一旦通过网桥暴露，**同一网桥内的任何容器都能调用全部工具**，包括添加主机、在已配置主机上执行命令。只把你信任的容器接进该网桥。

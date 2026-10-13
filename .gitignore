@@ -3,6 +3,11 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# Secrets staged for container deployment (never commit)
+secrets/
+*.pem
+*.key
+
 # Runtime / local state (never commit secrets)
 /.ssh-connector-data/
 /.playwright-cli/
