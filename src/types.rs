@@ -85,6 +85,9 @@ pub struct HostConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     pub user: String,
+    /// Non-secret operator notes returned to MCP so callers know shell and safety constraints.
+    #[serde(default)]
+    pub notes: String,
     pub auth: AuthMethod,
     #[serde(default)]
     pub jump_hosts: Vec<JumpHop>,
@@ -120,6 +123,9 @@ pub struct HostDetail {
     pub host: String,
     pub port: u16,
     pub user: String,
+    /// Non-secret operator notes.
+    #[serde(default)]
+    pub notes: String,
     pub auth: AuthMethod,
     pub auth_kind: String,
     pub jump_hosts: Vec<JumpHop>,
@@ -138,6 +144,7 @@ impl HostDetail {
             host: redacted.host,
             port: redacted.port,
             user: redacted.user,
+            notes: redacted.notes,
             auth_kind: redacted.auth.kind().to_string(),
             auth: redacted.auth,
             jump_count: redacted.jump_hosts.len(),
@@ -161,6 +168,9 @@ pub struct HostSpec {
     pub port: u16,
     /// Target SSH login user.
     pub user: String,
+    /// Non-secret operator notes returned to MCP.
+    #[serde(default)]
+    pub notes: String,
     /// Target credential object. Choose exactly one tagged shape:
     /// {"type":"password","password":"..."},
     /// {"type":"private_key","key_pem":"-----BEGIN OPENSSH PRIVATE KEY-----\n...","passphrase":"optional"},
@@ -224,6 +234,7 @@ pub struct HostSummary {
     pub host: String,
     pub port: u16,
     pub user: String,
+    pub notes: String,
     pub auth_kind: String,
     pub jump_count: usize,
     pub status: HostStatus,
@@ -237,6 +248,7 @@ impl HostSummary {
             host: c.host.clone(),
             port: c.port,
             user: c.user.clone(),
+            notes: c.notes.clone(),
             auth_kind: c.auth.kind().to_string(),
             jump_count: c.jump_hosts.len(),
             status,

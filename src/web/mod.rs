@@ -30,6 +30,7 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/status", get(status))
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
+        .route("/vault/lock-management", post(vault_lock_management))
         .route("/hosts", get(get_hosts).post(add_host))
         .route("/hosts/{id}", put(update_host).delete(remove_host))
         .route("/hosts/{id}/connect", post(connect_host))
@@ -85,6 +86,7 @@ async fn status(State(st): State<Shared>) -> ApiResult {
     Ok(Json(json!({
         "vault_initialized": st.vault.is_initialized().map_err(ApiError::from)?,
         "vault_unlocked": st.vault.is_unlocked(),
+        "management_unlocked": st.vault.is_management_unlocked(),
         "version": env!("CARGO_PKG_VERSION"),
     })))
 }
@@ -110,6 +112,14 @@ async fn vault_unlock(State(st): State<Shared>, Json(req): Json<MasterPassword>)
         .map_err(ApiError::from)?;
     st.audit.record(
         crate::audit::AuditLog::entry("vault_unlock").with_detail(json!({ "source": "web" })),
+    );
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn vault_lock_management(State(st): State<Shared>) -> ApiResult {
+    st.vault.lock_management();
+    st.audit.record(
+        crate::audit::AuditLog::entry("management_lock").with_detail(json!({ "source": "web" })),
     );
     Ok(Json(json!({ "ok": true })))
 }
@@ -160,6 +170,7 @@ async fn reveal_host(
         .vault
         .reveal_credentials(&id, &req.master_password)
         .map_err(ApiError::from)?;
+    st.vault.lock_management();
     st.audit.record(
         crate::audit::AuditLog::entry("credential_reveal")
             .with_host(&id)

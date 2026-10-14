@@ -27,7 +27,7 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     let data_dir = config::resolve_data_dir(opts.data_dir.clone())?;
     let cfg = Config::load_or_init(&data_dir)?;
 
-    let vault = Arc::new(Vault::open(&data_dir.join("vault.db"))?);
+    let vault = Arc::new(Vault::open(&data_dir.join("vault.db"), &data_dir.join("runtime-key"))?);
     let audit = Arc::new(AuditLog::new(data_dir.join("audit")));
 
     // Optional headless unlock. If the vault is uninitialized, unlock is skipped
@@ -40,9 +40,7 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     if opts.stdio_mcp {
         // stdio MCP requires an already-unlocked vault (no interactive prompt).
         if !state.vault.is_unlocked() {
-            anyhow::bail!(
-                "stdio MCP mode requires the vault to be unlocked; pass --master-password-env or --master-password-stdin"
-            );
+            anyhow::bail!("stdio MCP mode requires runtime credentials; initialize or unlock the vault once")
         }
         return crate::mcp::serve_stdio(state).await;
     }
@@ -69,8 +67,10 @@ fn maybe_unlock(vault: &Vault, opts: &DaemonOptions) -> anyhow::Result<()> {
         None
     };
     if let Some(pw) = pw {
-        vault.unlock(&pw)?;
-        tracing::info!("vault unlocked at startup");
+        match vault.unlock(&pw) {
+            Ok(()) => tracing::info!("vault unlocked at startup"),
+            Err(error) => tracing::error!(error = %error, "startup unlock failed; continuing locked for management"),
+        }
     }
     Ok(())
 }

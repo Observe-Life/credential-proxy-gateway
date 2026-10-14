@@ -18,6 +18,8 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use zeroize::Zeroizing;
 
 const DEK_LEN: usize = 32;
@@ -81,11 +83,13 @@ struct Unlocked {
 pub struct Vault {
     conn: Mutex<Connection>,
     unlocked: Mutex<Option<Unlocked>>,
+    management_unlocked: Mutex<bool>,
+    runtime_key_path: std::path::PathBuf,
 }
 
 impl Vault {
     /// Open (or create) the vault database at `path`. Does not unlock.
-    pub fn open(path: &Path) -> Result<Vault> {
+    pub fn open(path: &Path, runtime_key_path: &Path) -> Result<Vault> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -110,9 +114,24 @@ impl Vault {
                  PRIMARY KEY (host, port)
              );",
         )?;
+        let runtime_key_path = runtime_key_path.to_path_buf();
+        let initialized: bool = {
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM vault_meta", [], |r| r.get(0))?;
+            n > 0
+        };
+        let unlocked = if initialized {
+            std::fs::read(&runtime_key_path).ok().and_then(|bytes| {
+                if bytes.len() != DEK_LEN { return None; }
+                let mut dek = Zeroizing::new([0u8; DEK_LEN]);
+                dek.copy_from_slice(&bytes);
+                Some(Unlocked { dek })
+            })
+        } else { None };
         Ok(Vault {
             conn: Mutex::new(conn),
-            unlocked: Mutex::new(None),
+            management_unlocked: Mutex::new(false),
+            runtime_key_path,
+            unlocked: Mutex::new(unlocked),
         })
     }
 
@@ -128,6 +147,26 @@ impl Vault {
 
     pub fn is_unlocked(&self) -> bool {
         self.unlocked.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    pub fn is_management_unlocked(&self) -> bool {
+        self.management_unlocked.lock().map(|g| *g).unwrap_or(false)
+    }
+
+    fn save_runtime_key(&self, dek: &[u8; DEK_LEN]) -> Result<()> {
+        if let Some(parent) = self.runtime_key_path.parent() { std::fs::create_dir_all(parent)?; }
+        let tmp = self.runtime_key_path.with_extension("tmp");
+        std::fs::write(&tmp, dek)?;
+        let mut perms = std::fs::metadata(&tmp)?.permissions();
+        #[cfg(unix)]
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&tmp, perms)?;
+        std::fs::rename(tmp, &self.runtime_key_path)?;
+        Ok(())
+    }
+
+    fn require_management(&self) -> Result<()> {
+        if self.is_management_unlocked() { Ok(()) } else { Err(ConnectorError::locked()) }
     }
 
     /// First-run: create the vault with a master password. Generates salt + DEK.
@@ -152,7 +191,9 @@ impl Vault {
         // Unlock immediately after init.
         let mut dek_arr = Zeroizing::new([0u8; 32]);
         dek_arr.copy_from_slice(&dek);
+        self.save_runtime_key(&dek_arr)?;
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = Some(Unlocked { dek: dek_arr });
+        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = true;
         Ok(())
     }
 
@@ -177,13 +218,20 @@ impl Vault {
         }
         let mut dek_arr = Zeroizing::new([0u8; 32]);
         dek_arr.copy_from_slice(&dek);
+        self.save_runtime_key(&dek_arr)?;
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = Some(Unlocked { dek: dek_arr });
+        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = true;
         Ok(())
     }
 
     /// Forget the in-memory DEK.
     pub fn lock(&self) {
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    }
+
+    pub fn lock_management(&self) {
+        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = false;
     }
 
     /// Run a closure with the live DEK, or fail if locked.
@@ -217,6 +265,7 @@ impl Vault {
 
     /// Insert a new host, returning its assigned id.
     pub fn add_host(&self, spec: HostSpec) -> Result<String> {
+        self.require_management()?;
         let id = Self::gen_id()?;
         let cfg = HostConfig {
             id: id.clone(),
@@ -224,6 +273,7 @@ impl Vault {
             host: spec.host,
             port: spec.port,
             user: spec.user,
+            notes: spec.notes,
             auth: spec.auth,
             jump_hosts: spec.jump_hosts,
             env: spec.env,
@@ -235,6 +285,7 @@ impl Vault {
 
     /// Overwrite an existing host wholesale (AI may write new secrets here).
     pub fn update_host(&self, id: &str, spec: HostSpec) -> Result<()> {
+        self.require_management()?;
         // Ensure it exists.
         let existing = self.get_host_config(id)?;
         let cfg = HostConfig {
@@ -243,6 +294,7 @@ impl Vault {
             host: spec.host,
             port: spec.port,
             user: spec.user,
+            notes: spec.notes,
             auth: merge_auth(existing.auth, spec.auth),
             jump_hosts: merge_jump_hosts(existing.jump_hosts, spec.jump_hosts),
             env: spec.env,
@@ -265,6 +317,7 @@ impl Vault {
     }
 
     pub fn remove_host(&self, id: &str) -> Result<()> {
+        self.require_management()?;
         let conn = self.lock_conn();
         let n = conn.execute("DELETE FROM hosts WHERE id = ?1", rusqlite::params![id])?;
         if n == 0 {
@@ -421,7 +474,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("vault-test-{}", super::Vault::gen_id().unwrap()));
         std::fs::create_dir_all(&dir).unwrap();
-        Vault::open(&dir.join("vault.db")).unwrap()
+        Vault::open(&dir.join("vault.db"), &dir.join("runtime-key")).unwrap()
     }
 
     #[test]
@@ -456,6 +509,7 @@ mod tests {
             host: "1.2.3.4".into(),
             port: 22,
             user: "root".into(),
+            notes: String::new(),
             auth: AuthMethod::Password {
                 password: "s3cr3t".into(),
             },
@@ -497,6 +551,7 @@ mod tests {
                 host: "1.2.3.4".into(),
                 port: 22,
                 user: "ubuntu".into(),
+                notes: String::new(),
                 auth: AuthMethod::Password {
                     password: "ssh-secret".into(),
                 },
@@ -518,6 +573,7 @@ mod tests {
                 host: "1.2.3.4".into(),
                 port: 22,
                 user: "ubuntu".into(),
+                notes: String::new(),
                 auth: AuthMethod::Password {
                     password: "***".into(),
                 },
@@ -553,6 +609,7 @@ mod tests {
             host: "h".into(),
             port: 22,
             user: "u".into(),
+            notes: String::new(),
             auth: AuthMethod::Password {
                 password: "p".into(),
             },

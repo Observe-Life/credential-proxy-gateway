@@ -68,6 +68,7 @@ impl AppState {
     pub fn add_host(&self, spec: HostSpec) -> Result<String> {
         let detail = host_spec_audit_detail(&spec);
         let id = self.vault.add_host(spec)?;
+        self.vault.lock_management();
         self.audit.record(
             AuditLog::entry("host_add")
                 .with_host(&id)
@@ -79,6 +80,7 @@ impl AppState {
     pub fn update_host(&self, id: &str, spec: HostSpec) -> Result<()> {
         let detail = host_spec_audit_detail(&spec);
         self.vault.update_host(id, spec)?;
+        self.vault.lock_management();
         self.audit.record(
             AuditLog::entry("host_update")
                 .with_host(id)
@@ -90,6 +92,7 @@ impl AppState {
     pub async fn remove_host(&self, id: &str) -> Result<()> {
         self.pool.disconnect(id).await;
         self.vault.remove_host(id)?;
+        self.vault.lock_management();
         self.audit
             .record(AuditLog::entry("host_remove").with_host(id));
         Ok(())
