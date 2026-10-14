@@ -200,7 +200,7 @@ impl Vault {
     }
 
     fn require_management(&self) -> Result<()> {
-        if self.is_management_unlocked() { Ok(()) } else { Err(ConnectorError::locked()) }
+        if self.is_management_unlocked() { Ok(()) } else { Err(ConnectorError::new(ErrorCode::VaultLocked,"请提醒用户在凭证代理保险箱网页打开30分钟临时管理开关")) }
     }
 
     /// First-run: create the vault with a master password. Generates salt + DEK.

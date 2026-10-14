@@ -68,7 +68,9 @@ async fn native_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
     if let Some(id)=sid{let _=client.delete(url.as_str()).header("Mcp-Session-Id",id).header("Authorization",header).send().await;}
     let (value,_)=result?;
     if value.get("error").is_some(){return Err(internal("upstream MCP tool rejected request"))}
-    Ok(value.get("result").cloned().unwrap_or(Value::Null))
+    let result=value.get("result").cloned().unwrap_or(Value::Null);
+    if result.get("isError").and_then(Value::as_bool)==Some(true){return Err(internal("upstream MCP tool returned an error"))}
+    Ok(result)
 }
 fn clean_highlight(s:&str)->String{s.replace("<em class=\"highlight\">","").replace("</em>","")}
 fn clean_wechat(v:&mut Value){match v {Value::Array(a)=>for x in a{clean_wechat(x)},Value::Object(o)=>{for(k,x)in o.iter_mut(){if ["title","desc"].contains(&k.as_str()){if let Some(s)=x.as_str(){*x=Value::String(clean_highlight(s))}}else{clean_wechat(x)}}if let Some(timestamp)=o.get("date").and_then(Value::as_i64){if let Ok(t)=time::OffsetDateTime::from_unix_timestamp(timestamp){let t=t.to_offset(time::UtcOffset::from_hms(8,0,0).unwrap());o.insert("date_local".into(),Value::String(format!("{}",t)));}}},_=>{}}}
@@ -77,7 +79,7 @@ pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,mut args:Value)->Result<V
     let record=st.vault.get_service_record(id)?;
     let result=match record.adapter.as_str(){
         "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"Query required"))}let body=json!({"Query":q,"SearchType":"web","Count":args.get("Count").or_else(||args.get("count")).and_then(Value::as_u64).unwrap_or(10).clamp(1,50),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
-        "wechat"=>{if let Some(o)=args.as_object_mut(){o.insert("business_type".into(),json!("article"));o.insert("sort".into(),json!(0));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
+        "wechat"=>{if let Some(o)=args.as_object_mut(){o.insert("business_type".into(),json!("article"));o.insert("sort".into(),json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
         "exa"=>{if args.get("objective").and_then(Value::as_str).unwrap_or("").trim().is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"objective required"))}native_call(&record,tool,args).await?},
         "github"=>github_call(&record,tool,args).await?,
         _=>return Err(internal("adapter not supported")),
