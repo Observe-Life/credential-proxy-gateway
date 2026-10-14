@@ -170,6 +170,7 @@ function switchView(viewName) {
   if (viewName === 'hosts')    loadHosts();
   if (viewName === 'sessions') loadSessions();
   if (viewName === 'audit')    loadAudit();
+  if (viewName === 'settings') loadSettings();
   // Stop sessions poller when leaving sessions view
   if (viewName !== 'sessions') stopSessionsPoller();
 }
@@ -1065,4 +1066,25 @@ function attachEventListeners() {
 document.addEventListener('DOMContentLoaded', () => {
   attachEventListeners();
   boot();
+});
+
+async function loadSettings() {
+  try {
+    const v = await apiFetch('GET', '/settings');
+    $('mcp-idle-minutes').value = v.saved_minutes;
+    $('settings-runtime').textContent = `当前运行：${v.active_minutes} 分钟；已保存：${v.saved_minutes} 分钟。` + (v.restart_required ? '重启连接器后生效。' : '当前已生效。') + (v.environment_override ? '环境变量正在覆盖网页设置。' : '');
+    $('settings-save').disabled = !!v.environment_override;
+  } catch (e) { $('settings-status').textContent = describeError(e); }
+}
+$('settings-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const minutes = Number($('mcp-idle-minutes').value);
+  if (!Number.isInteger(minutes) || minutes < 5 || minutes > 1440) { $('settings-status').textContent = '请输入5至1440之间的整数。'; return; }
+  $('settings-save').disabled = true;
+  try {
+    await apiFetch('PUT', '/settings', {mcp_idle_timeout_minutes: minutes});
+    $('settings-status').textContent = '设置已保存。修改将在重启连接器后生效。管理权限已重新锁定。';
+    await loadSettings();
+  } catch(e) { $('settings-status').textContent = describeError(e); }
+  finally { $('settings-save').disabled = false; }
 });

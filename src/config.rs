@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_mcp_idle_minutes")]
+    pub mcp_idle_timeout_minutes: u64,
+    #[serde(skip)]
+    pub config_path: PathBuf,
     /// Web UI bind address. Forced to loopback by the daemon regardless.
     #[serde(default = "default_web_port")]
     pub web_port: u16,
@@ -28,6 +32,8 @@ pub struct Config {
     #[serde(default = "default_max_channels")]
     pub max_channels_per_host: usize,
 }
+
+fn default_mcp_idle_minutes() -> u64 { 120 }
 
 fn default_web_port() -> u16 {
     7600
@@ -54,6 +60,8 @@ fn default_max_channels() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            mcp_idle_timeout_minutes: default_mcp_idle_minutes(),
+            config_path: PathBuf::new(),
             web_port: default_web_port(),
             mcp_port: default_mcp_port(),
             exec_timeout_ms: default_exec_timeout_ms(),
@@ -69,14 +77,19 @@ impl Config {
     /// Load from `data_dir/config.toml`, writing defaults if absent.
     pub fn load_or_init(data_dir: &Path) -> anyhow::Result<Config> {
         let path = data_dir.join("config.toml");
-        if path.exists() {
-            let text = std::fs::read_to_string(&path)?;
-            Ok(toml::from_str(&text)?)
+        let mut cfg: Config = if path.exists() {
+            toml::from_str(&std::fs::read_to_string(&path)?)?
         } else {
             let cfg = Config::default();
             std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
-            Ok(cfg)
+            cfg
+        };
+        cfg.config_path = path;
+        if let Ok(value) = std::env::var("SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES") {
+            cfg.mcp_idle_timeout_minutes = value.trim().parse()?;
         }
+        anyhow::ensure!((5..=1440).contains(&cfg.mcp_idle_timeout_minutes), "MCP idle timeout must be 5..1440 minutes");
+        Ok(cfg)
     }
 }
 

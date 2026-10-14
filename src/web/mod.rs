@@ -28,6 +28,7 @@ type Shared = Arc<AppState>;
 pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route("/settings", get(get_settings).put(save_settings))
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
         .route("/vault/lock-management", post(vault_lock_management))
@@ -79,6 +80,40 @@ impl IntoResponse for ApiError {
 }
 
 type ApiResult = std::result::Result<Json<serde_json::Value>, ApiError>;
+
+#[derive(Deserialize)]
+struct SettingsRequest { mcp_idle_timeout_minutes: u64 }
+
+async fn get_settings(State(st): State<Shared>) -> ApiResult {
+    let saved: crate::config::Config = toml::from_str(
+        &std::fs::read_to_string(&st.config.config_path).map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?
+    ).map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
+    let active = st.config.mcp_idle_timeout_minutes;
+    Ok(Json(json!({"saved_minutes": saved.mcp_idle_timeout_minutes, "active_minutes": active,
+        "restart_required": saved.mcp_idle_timeout_minutes != active,
+        "environment_override": std::env::var("SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES").is_ok()})))
+}
+
+async fn save_settings(State(st): State<Shared>, Json(req): Json<SettingsRequest>) -> ApiResult {
+    if !st.vault.is_management_unlocked() { return Err(ApiError(ConnectorError::locked())); }
+    if !(5..=1440).contains(&req.mcp_idle_timeout_minutes) {
+        return Err(ApiError(ConnectorError::new(ErrorCode::BadRequest, "空闲回收时间必须为5至1440分钟")));
+    }
+    if std::env::var("SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES").is_ok() {
+        return Err(ApiError(ConnectorError::new(ErrorCode::BadRequest, "环境变量正在覆盖设置，请先移除该环境变量再使用网页保存")));
+    }
+    let file = &st.config.config_path;
+    let text = std::fs::read_to_string(file).map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
+    let mut saved: crate::config::Config = toml::from_str(&text).map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
+    saved.mcp_idle_timeout_minutes = req.mcp_idle_timeout_minutes;
+    let text = toml::to_string_pretty(&saved).map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
+    let tmp = file.with_extension("toml.tmp");
+    std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, file))
+        .map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
+    st.audit.record(crate::audit::AuditLog::entry("mcp_idle_timeout_update").with_detail(json!({"minutes":req.mcp_idle_timeout_minutes})));
+    st.vault.lock_management();
+    get_settings(State(st)).await
+}
 
 // --- Vault / status ---
 

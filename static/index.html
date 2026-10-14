@@ -46,6 +46,7 @@
         <li><button class="nav-item active" data-view="hosts" aria-current="page">&#9638; 主机</button></li>
         <li><button class="nav-item" data-view="sessions">&#9654; 会话</button></li>
         <li><button class="nav-item" data-view="audit">&#8801; 审计日志</button></li>
+        <li><button class="nav-item" data-view="settings">&#9881; 设置</button></li>
       </ul>
       <div class="sidebar-panel" aria-label="安全边界">
         <span class="panel-label">安全边界</span>
@@ -133,6 +134,18 @@
         <div id="audit-loading" class="loading-state hidden">加载中&hellip;</div>
         <div id="audit-empty" class="empty-state hidden">没有审计记录。</div>
         <div id="audit-list" class="audit-list hidden"></div>
+      </section>
+      <section id="view-settings" class="view hidden" aria-label="设置">
+        <header class="view-header"><div class="view-title-group"><h2>设置</h2><p>管理智能体与连接器之间的通信会话。</p></div></header>
+        <form id="settings-form">
+          <div class="field-group"><label for="mcp-idle-minutes">MCP 空闲回收时间（分钟）</label>
+          <input id="mcp-idle-minutes" type="number" min="5" max="1440" step="1" required aria-describedby="settings-help" /></div>
+          <p id="settings-help">范围：5～1440 分钟（24 小时），默认 120 分钟。此项不是 SSH 终端的空闲时间。</p>
+          <p id="settings-runtime" role="status"></p>
+          <button id="settings-save" type="submit" class="btn btn-primary">保存设置</button>
+          <p>保存需先解锁管理权限；修改后重启连接器生效，已建立的 MCP 会话不会被网页直接断开。</p>
+          <div id="settings-status" role="status" aria-live="polite"></div>
+        </form>
       </section>
     </main>
   </div>

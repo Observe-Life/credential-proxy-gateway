@@ -834,8 +834,8 @@ pub fn build_http_service(
             }
         }
     }
-    let raw_timeout = std::env::var(MCP_IDLE_TIMEOUT_ENV).ok();
-    let timeout = parse_mcp_idle_timeout(raw_timeout.as_deref())
+    let saved_minutes = state.config.mcp_idle_timeout_minutes.to_string();
+    let timeout = parse_mcp_idle_timeout(Some(&saved_minutes))
         .unwrap_or_else(|error| panic!("{MCP_IDLE_TIMEOUT_ENV}: {error}"));
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(timeout);
