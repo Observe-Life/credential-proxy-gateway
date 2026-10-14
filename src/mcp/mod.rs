@@ -22,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
+use std::time::Duration;
 
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
@@ -801,6 +802,20 @@ impl ServerHandler for McpServer {
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
+const MCP_IDLE_TIMEOUT_ENV: &str = "SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES";
+
+fn parse_mcp_idle_timeout(raw: Option<&str>) -> Result<Duration, &'static str> {
+    let minutes = match raw {
+        None => 120,
+        Some(value) => value.trim().parse::<u64>()
+            .map_err(|_| "must be an integer number of minutes (5..=1440)")?,
+    };
+    if !(5..=1440).contains(&minutes) {
+        return Err("must be between 5 and 1440 minutes inclusive");
+    }
+    Ok(Duration::from_secs(minutes * 60))
+}
+
 /// Build a Streamable-HTTP MCP service that the daemon mounts under `/mcp`.
 /// Each connection gets a fresh `McpServer` sharing the same `AppState`.
 pub fn build_http_service(
@@ -819,9 +834,15 @@ pub fn build_http_service(
             }
         }
     }
+    let raw_timeout = std::env::var(MCP_IDLE_TIMEOUT_ENV).ok();
+    let timeout = parse_mcp_idle_timeout(raw_timeout.as_deref())
+        .unwrap_or_else(|error| panic!("{MCP_IDLE_TIMEOUT_ENV}: {error}"));
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(timeout);
+    tracing::info!(idle_timeout_minutes = timeout.as_secs() / 60, "MCP session idle timeout configured");
     StreamableHttpService::new(
         move || Ok(McpServer::new(state.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(sessions),
         config,
     )
 }
@@ -839,6 +860,23 @@ pub async fn serve_stdio(state: Arc<AppState>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_idle_timeout_default_and_bounds() {
+        assert_eq!(parse_mcp_idle_timeout(None).unwrap(), Duration::from_secs(7200));
+        for minutes in [5, 120, 1440] {
+            let value = minutes.to_string();
+            assert_eq!(parse_mcp_idle_timeout(Some(&value)).unwrap(), Duration::from_secs(minutes * 60));
+        }
+        assert_eq!(parse_mcp_idle_timeout(Some(" 120 ")).unwrap(), Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn mcp_idle_timeout_rejects_invalid_values() {
+        for value in ["", "0", "4", "1441", "-5", "1.5", "abc", "18446744073709551616"] {
+            assert!(parse_mcp_idle_timeout(Some(value)).is_err(), "accepted: {value}");
+        }
+    }
 
     #[test]
     fn ai_tool_surface_has_transfers_but_no_credential_reveal() {
