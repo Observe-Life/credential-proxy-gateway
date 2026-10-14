@@ -268,6 +268,55 @@ impl Vault {
         self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).close();
     }
 
+    pub fn open_management_grant(&self) -> Result<()> {
+        if !self.is_unlocked() { return Err(ConnectorError::locked()); }
+        self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).open(Instant::now());
+        Ok(())
+    }
+
+    fn service_table(&self) -> Result<()> {
+        self.lock_conn().execute("CREATE TABLE IF NOT EXISTS mcp_services (id TEXT PRIMARY KEY, sealed BLOB NOT NULL)", [])?;
+        Ok(())
+    }
+
+    pub fn put_service_record(&self, mut record: crate::services::ServiceRecord) -> Result<()> {
+        self.require_management()?;
+        record.validate()?;
+        if record.credential.is_empty() {
+            if let Ok(existing) = self.get_service_record(&record.id) { record.credential = existing.credential; }
+        }
+        self.service_table()?;
+        let bytes = serde_json::to_vec(&record).map_err(|_| ConnectorError::internal("registration serialization failed"))?;
+        let sealed = self.with_dek(|dek| seal(dek, &bytes))?;
+        self.lock_conn().execute("INSERT INTO mcp_services (id,sealed) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed", rusqlite::params![record.id, sealed])?;
+        Ok(())
+    }
+
+    pub fn get_service_record(&self, id: &str) -> Result<crate::services::ServiceRecord> {
+        self.service_table()?;
+        let sealed: Vec<u8> = self.lock_conn().query_row("SELECT sealed FROM mcp_services WHERE id=?1", [id], |r| r.get(0))?;
+        let bytes = self.with_dek(|dek| open(dek, &sealed))?;
+        serde_json::from_slice(&bytes).map_err(|_| ConnectorError::internal("registration unreadable"))
+    }
+
+    pub fn service_metadata(&self) -> Result<Vec<serde_json::Value>> {
+        self.service_table()?;
+        let ids: Vec<String> = {
+            let conn = self.lock_conn();
+            let mut stmt = conn.prepare("SELECT id FROM mcp_services ORDER BY id")?;
+            let values = stmt.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            values
+        };
+        ids.iter().map(|id| self.get_service_record(id).map(|r| r.metadata())).collect()
+    }
+
+    pub fn remove_service_record(&self, id: &str) -> Result<()> {
+        self.require_management()?;
+        self.service_table()?;
+        self.lock_conn().execute("DELETE FROM mcp_services WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     /// Run a closure with the live DEK, or fail if locked.
     fn with_dek<T>(&self, f: impl FnOnce(&[u8; 32]) -> Result<T>) -> Result<T> {
         let guard = self.unlocked.lock().unwrap_or_else(|p| p.into_inner());
@@ -691,5 +740,32 @@ mod management_grant_tests {
         grant.close();
         assert!(!grant.is_open(start));
         assert!(!ManagementGrant::default().is_open(start));
+    }
+}
+
+#[cfg(test)]
+mod service_registry_tests {
+    use super::*;
+    use crate::services::ServiceRecord;
+
+    #[test]
+    fn registry_requires_grant_encrypts_and_redacts_secret() {
+        let dir = std::env::temp_dir().join(format!("registry-test-{}", Vault::gen_id().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = Vault::open(&dir.join("vault.db"), &dir.join("runtime-key")).unwrap();
+        vault.init("test-master-password").unwrap();
+        vault.lock_management();
+        let mut record = ServiceRecord { id:"github".into(), name:"GitHub".into(), adapter:"github".into(), url:String::new(), credential:"secret-registry-test".into(), tools:serde_json::json!(["gh_status"]), notes:"test".into() };
+        assert!(vault.put_service_record(record.clone()).is_err());
+        vault.open_management_grant().unwrap();
+        vault.put_service_record(record.clone()).unwrap();
+        assert!(vault.is_management_unlocked());
+        assert!(!vault.service_metadata().unwrap()[0].to_string().contains("secret-registry-test"));
+        record.credential.clear();
+        record.notes="edited".into();
+        vault.put_service_record(record).unwrap();
+        assert_eq!(vault.get_service_record("github").unwrap().credential,"secret-registry-test");
+        vault.lock_management();
+        assert!(vault.remove_service_record("github").is_err());
     }
 }

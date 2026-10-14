@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SSH 连接器</title>
+  <title>凭证代理保险箱</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
@@ -15,7 +15,7 @@
   <!-- LOCK SCREEN -->
   <div id="lock-screen" class="lock-screen hidden" role="main" aria-label="凭据库访问">
     <div class="lock-card">
-      <h1 class="lock-title">SSH 连接器</h1>
+      <h1 class="lock-title">凭证代理保险箱</h1>
       <p id="lock-subtitle" class="lock-subtitle"></p>
       <form id="lock-form" novalidate>
         <div class="field-group">
@@ -39,10 +39,11 @@
     <nav id="sidebar" class="sidebar" aria-label="主导航">
       <div class="sidebar-brand">
         <span class="brand-kicker">AI-safe SSH MCP</span>
-        <span class="brand-name">SSH 连接器</span>
+        <span class="brand-name">凭证代理保险箱</span>
         <span class="brand-subtitle">本地加密凭据库 · 远端运维工具面</span>
       </div>
       <ul class="nav-list" role="list">
+        <li><button class="nav-item" data-view="registry">MCP 注册</button></li>
         <li><button class="nav-item active" data-view="hosts" aria-current="page">&#9638; 主机</button></li>
         <li><button class="nav-item" data-view="sessions">&#9654; 会话</button></li>
         <li><button class="nav-item" data-view="audit">&#8801; 审计日志</button></li>
@@ -52,14 +53,30 @@
         <span class="panel-label">安全边界</span>
         <span>凭据只写入加密 vault</span>
         <span>AI 侧仅引用 host_id</span>
-        <span>HTTP/MCP 仅监听 127.0.0.1</span>
+        <span>容器间通信：backend 自定义网桥</span>
       </div>
       <div class="sidebar-footer">
-        <button id="lock-btn" class="btn btn-ghost btn-sm">锁定凭据库</button>
+        <button id="lock-btn" class="btn btn-ghost btn-sm">关闭临时管理授权</button>
       </div>
     </nav>
     <main id="content" class="content">
       <!-- HOSTS VIEW -->
+      <section class="view-header" aria-label="临时授权">
+        <label><input type="checkbox" id="management-grant-switch" /> 允许智能体管理凭据</label>
+        <span>开关打开30分钟后自动关闭</span><span id="management-countdown" role="status"></span>
+      </section>
+      <section id="view-registry" class="view hidden"><h2>MCP 注册</h2>
+        <p>工具说明可读；凭据加密保存、不回显。新增或修改前打开顶部临时开关。</p>
+        <div id="registry-list"></div>
+        <form id="registry-form" class="modal-body">
+          <label>标识<input name="id" required /></label><label>名称<input name="name" required /></label>
+          <label>接口类型<select name="adapter"><option value="exa">Exa搜索</option><option value="doubao">豆包搜索（国内版）</option><option value="wechat">微信公众号文章</option><option value="github">GitHub</option></select></label>
+          <label>接口地址<input name="url" /></label><label>凭据<input name="credential" type="password" autocomplete="new-password" placeholder="留空保留原凭据" /></label>
+          <label>可用工具（JSON）<textarea name="tools" rows="7">[]</textarea></label>
+          <label>调用注意事项<textarea name="notes" rows="5"></textarea></label>
+          <button class="btn btn-primary">保存注册</button><p id="registry-message" role="status"></p>
+        </form>
+      </section>
       <section id="view-hosts" class="view" aria-label="主机">
         <header class="view-header">
           <div class="view-title-group">

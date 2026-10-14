@@ -11,6 +11,7 @@ mod state;
 mod term;
 mod vault;
 mod web;
+mod services;
 
 use clap::Parser;
 

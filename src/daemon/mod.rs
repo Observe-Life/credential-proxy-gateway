@@ -34,6 +34,19 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     // and the Web UI drives first-run init.
     maybe_unlock(&vault, &opts)?;
 
+    // One-time migration file is read only inside the service. Never log its contents.
+    // Credential records are encrypted immediately with the existing vault DEK.
+    if let Ok(file) = std::env::var("CREDENTIAL_VAULT_IMPORT_FILE") {
+        if std::path::Path::new(&file).exists() {
+            let records: Vec<crate::services::ServiceRecord> = serde_json::from_slice(&std::fs::read(&file)?)?;
+            vault.open_management_grant()?;
+            for record in records { vault.put_service_record(record)?; }
+            vault.lock_management();
+            std::fs::remove_file(&file)?;
+            tracing::info!("MCP credential migration completed; import file removed");
+        }
+    }
+
     let local_token = generate_token();
     let state = AppState::new(vault, audit, cfg.clone(), local_token);
 

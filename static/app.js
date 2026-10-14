@@ -106,7 +106,7 @@ async function apiFetch(method, path, body) {
     headers: { 'Content-Type': 'application/json' },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch('/api' + path, opts);
+  const res = await fetch('/vault/api' + path, opts);
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { message: text || res.statusText }; }
@@ -167,6 +167,7 @@ function switchView(viewName) {
     sec.classList.toggle('hidden', sec.id !== `view-${viewName}`);
   });
   // Load data for the view
+  if (viewName === 'registry') loadRegistry();
   if (viewName === 'hosts')    loadHosts();
   if (viewName === 'sessions') loadSessions();
   if (viewName === 'audit')    loadAudit();
@@ -207,6 +208,7 @@ function showApp() {
   el.lockScreen().classList.add('hidden');
   el.app().classList.remove('hidden');
   switchView('hosts');
+  refreshGrant();
 }
 
 async function handleLockSubmit(e) {
@@ -962,7 +964,7 @@ function auditActionLabel(action) {
 
 function describeError(err) {
   const byCode = {
-    vault_locked: '凭据库已锁定，请先输入主密码解锁。',
+    vault_locked: '请在顶部打开30分钟临时管理开关。',
     vault_bad_password: '主密码不正确。',
     vault_already_init: '凭据库已经初始化。',
     host_not_found: '找不到指定主机。',
@@ -984,7 +986,9 @@ function describeError(err) {
 async function boot() {
   await checkVaultStatus();
   if (!state.vaultUnlocked) {
-    showLockScreen();
+    el.lockScreen().classList.add('hidden');
+    el.app().classList.remove('hidden');
+    showToast('服务未就绪或统一登录已失效，请返回统一入口。', 'error');
   } else {
     showApp();
   }
@@ -996,11 +1000,7 @@ function attachEventListeners() {
 
   // Lock vault button
   el.lockBtn().addEventListener('click', () => {
-    // The daemon holds session state; we just return to the lock screen locally.
-    state.vaultUnlocked = false;
-    stopSessionsPoller();
-    closeTerminal();
-    showLockScreen();
+    apiFetch('PUT', '/management/grant', {enabled:false}).then(refreshGrant).catch(e=>showToast(describeError(e),'error'));
   });
 
   // Nav
@@ -1088,3 +1088,13 @@ $('settings-form').addEventListener('submit', async e => {
   } catch(e) { $('settings-status').textContent = describeError(e); }
   finally { $('settings-save').disabled = false; }
 });
+
+async function refreshGrant(){
+  try {const v=await apiFetch('GET','/status');$('management-grant-switch').checked=v.management_unlocked;const left=v.management_remaining_seconds||0;$('management-countdown').textContent=left>0?`剩余 ${Math.floor(left/60)}分${left%60}秒`:'已关闭';} catch(e){$('management-countdown').textContent='登录已失效或服务未连接';}
+}
+$('management-grant-switch').addEventListener('change',async e=>{try{await apiFetch('PUT','/management/grant',{enabled:e.target.checked});await refreshGrant();}catch(err){e.target.checked=false;showToast(describeError(err),'error')}});
+setInterval(refreshGrant,10000);
+async function loadRegistry(){
+ try {const result=await apiFetch('GET','/registry');$('registry-list').replaceChildren();for(const item of result.services){const node=document.createElement('article'),title=document.createElement('h3'),notes=document.createElement('p'),button=document.createElement('button');title.textContent=item.name;notes.textContent=item.notes;button.textContent='编辑';button.type='button';button.className='btn btn-ghost';button.onclick=()=>{const f=$('registry-form');for(const k of ['id','name','adapter','url','notes'])f.elements[k].value=item[k]||'';f.elements.tools.value=JSON.stringify(item.tools,null,2);f.elements.credential.value=''};node.append(title,notes,button);$('registry-list').append(node)}await refreshGrant();}catch(e){$('registry-message').textContent=describeError(e)}
+}
+$('registry-form').addEventListener('submit',async e=>{e.preventDefault();const form=e.target;try{const value=Object.fromEntries(new FormData(form));value.tools=JSON.parse(value.tools);await apiFetch('PUT','/registry',value);form.elements.credential.value='';$('registry-message').textContent='已保存，凭据不回显。';await loadRegistry();}catch(err){$('registry-message').textContent=describeError(err)}});

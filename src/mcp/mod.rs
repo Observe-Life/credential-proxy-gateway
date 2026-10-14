@@ -422,8 +422,38 @@ fn merge_variants_into_object(
     map.remove("required");
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ServiceCall {
+    pub service_id: String,
+    pub tool: String,
+    #[serde(default)] pub arguments: Value,
+}
+#[derive(Deserialize, JsonSchema)]
+pub struct ServiceId { pub id: String }
+
 #[tool_router]
 impl McpServer {
+    #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证代理保险箱网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
+    async fn credential_registry(&self) -> Result<Json<Value>, ErrorData> {
+        let records = self.state.vault.service_metadata().map_err(err_to_mcp)?;
+        Ok(Json(serde_json::json!({"services":records,"management_open":self.state.vault.is_management_unlocked(),"remaining_seconds":self.state.vault.management_remaining_seconds()})))
+    }
+    #[tool(description = "新增或修改MCP注册、工具列表、调用注意事项及写入凭据。必须先由用户在网页打开临时开关；凭据永不回显。留空credential保留原值。")]
+    async fn credential_register(&self, Parameters(record): Parameters<crate::services::ServiceRecord>) -> Result<Json<OkResult>, ErrorData> {
+        self.state.vault.put_service_record(record).map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok:true }))
+    }
+    #[tool(description = "调用凭证代理保险箱中已注册的MCP工具。service_id/tool/arguments按credential_registry返回的工具和注意事项填写。程序附加凭据，模型不接收密钥。支持Exa、豆包、微信公众号、GitHub；GitHub用gh_status/gh_run/gh_git。")]
+    async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<Value>, ErrorData> {
+        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool, req.arguments).await.map_err(err_to_mcp)?;
+        Ok(Json(output))
+    }
+    #[tool(description = "删除MCP注册。用户须在网页打开30分钟临时管理开关。")]
+    async fn credential_remove(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
+        self.state.vault.remove_service_record(&req.id).map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok:true }))
+    }
+
     #[tool(
         description = "List all configured hosts with connection status. Returns redacted summaries only — never credentials."
     )]
@@ -433,7 +463,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create a new SSH host and encrypted credential entry. Required fields: alias, host, user, auth. Optional fields: port (default 22), notes, jump_hosts, env, become_root. Auth is a tagged object: password = {\"type\":\"password\",\"password\":\"...\"}; private_key = {\"type\":\"private_key\",\"key_pem\":\"-----BEGIN OPENSSH PRIVATE KEY-----\\n...\",\"passphrase\":\"optional\"}; keyboard_interactive = {\"type\":\"keyboard_interactive\",\"answers\":[\"answer1\",\"answer2\"]}. jump_hosts is an ordered bastion chain: [{\"host\":\"bastion.example.com\",\"port\":22,\"user\":\"root\",\"auth\":{...}}], and each hop has its own auth object. become_root enables login-as-user-then-su workflows for session_open_root: {\"enabled\":true,\"command\":\"su -\",\"password\":\"root-password\",\"prompt_timeout_ms\":5000}. env is a string key/value object applied to interactive sessions. Secrets are stored encrypted and are write-only to AI; read tools return redacted summaries. Returns the new host_id. Requires management unlock; successful management writes lock management immediately."
+        description = "Create a new SSH host and encrypted credential entry. Required fields: alias, host, user, auth. Optional fields: port (default 22), notes, jump_hosts, env, become_root. Auth is a tagged object: password = {\"type\":\"password\",\"password\":\"...\"}; private_key = {\"type\":\"private_key\",\"key_pem\":\"-----BEGIN OPENSSH PRIVATE KEY-----\\n...\",\"passphrase\":\"optional\"}; keyboard_interactive = {\"type\":\"keyboard_interactive\",\"answers\":[\"answer1\",\"answer2\"]}. jump_hosts is an ordered bastion chain: [{\"host\":\"bastion.example.com\",\"port\":22,\"user\":\"root\",\"auth\":{...}}], and each hop has its own auth object. become_root enables login-as-user-then-su workflows for session_open_root: {\"enabled\":true,\"command\":\"su -\",\"password\":\"root-password\",\"prompt_timeout_ms\":5000}. env is a string key/value object applied to interactive sessions. Secrets are stored encrypted and are write-only to AI; read tools return redacted summaries. Returns the new host_id. Requires management unlock; temporary management authority expires after 30 minutes."
     )]
     async fn host_add(
         &self,

@@ -1,27 +1,25 @@
 # 凭证代理保险箱（credential-proxy-vault）
 
-## 项目定位与开发进度
+由SSH连接器演进，保留原数据卷、主机、PTY、SFTP和审计。凭据加密存储；智能体决定调用，程序在网络请求内注入凭据，不提供明文读取工具。
 
-**系统标识、仓库名称和最终容器名称：`credential-proxy-vault`；用户界面与交流名称：凭证代理保险箱。**
+## 新功能（开发分支，尚未部署验收）
+- Exa远程MCP、豆包HTTP封装、微信公众号MCP、GitHub gh/git适配。
+- credential_registry/register/invoke/remove，编辑工具JSON和调用注意事项。
+- 顶部“允许智能体管理凭据”，30分钟服务端倒计时、关闭及重启失效。
+- /vault/管理页共享统一网页登录，不再次要求主密码；内部请求单独核验登录Cookie和服务间密钥。
+- Server酱成功/失败构建通知，地址仅Actions Secret。
 
-由 SSH 连接器演进为加密凭据保管、MCP 注册和接口适配服务，智能体仍决定调用工具和参数，凭证代理保险箱负责程序级注入，不把凭据明文返回模型。
+## 部署
+所有容器加入backend；内部地址credential-proxy-vault:7600。网页入口由container-login-gateway的/vault/反代。
+保险箱环境CREDENTIAL_VAULT_GATEWAY_AUTH_FILE与网关INTERNAL_AUTH_TOKEN_FILE指向相同服务间密钥文件，绝不写入仓库。
+原ssh-connector-mcp_ssh-connector-data数据卷需保留。CREDENTIAL_VAULT_IMPORT_FILE支持一次性从私有文件迁移注册及凭据，加密写入后删除文件。
+GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无新增业务操作白名单；打印输出会遮蔽已知令牌，不能承诺任意执行能力下不可提取密钥。
 
-当前已实现：SSH 主机管理、PTY/SFTP、审计、MCP 空闲回收设置（默认120分钟，范围5～1440）、已终止会话返回404。
-
-正在开发（**尚未上线**）：
-- Exa搜索、豆包搜索（国内版）、微信公众号文章、GitHub 四类适配；
-- 可编辑工具列表和调用注意事项；
-- 网页30分钟临时凭据管理开关，默认关闭，重启关闭；
-- 与容器统一登录网关共享认证，进入后不重复输入主密码；
-- 容器改名及原数据迁移。
-
-仓库已更名。线上容器暂仍为 `ssh-connector-mcp`，待功能与调用地址迁移一起验收后切换，避免旧 MCP 连接提前失效。原加密数据卷保留。
-
-GitHub工具保留广泛操作能力，不新增业务操作白名单。输出需遮蔽凭据；不宣称拥有任意命令执行能力时能绝对防止凭据提取。
-
-构建结果通过 Server酱 通知，地址保存在 Actions Secret `SERVERCHAN_NOTIFY_URL`，禁止写入源码。
-
----
+## 调用要求
+Exa query完整搜索描述，objective必填（要什么+排除什么），numResults默认10。
+豆包上游Query、SearchType=web、Count默认10；适配器补齐大写字段。
+微信调用wechat.wechat_search_v2_fetch_search，keyword必填，固定business_type=article sort=0。doc_url原文链接，desc摘要；date原秒级时间戳保留并加UTC+8 date_local；移除title/desc中的高亮em标签。
+GitHub gh_status/gh_run/gh_git，权限取决于令牌scope。
 
 > **English:** [README.en.md](README.en.md)
 >

@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/observe-life/ssh-connector-mcp
+  IMAGE_NAME: ghcr.io/observe-life/credential-proxy-vault
 
 jobs:
   container:

@@ -16,6 +16,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post, put},
+    middleware::{self, Next},
+    extract::Request,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -28,6 +30,9 @@ type Shared = Arc<AppState>;
 pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route("/management/grant", put(management_grant))
+        .route("/registry", get(registry_list).put(registry_save))
+        .route("/registry/{id}", axum::routing::delete(registry_delete))
         .route("/settings", get(get_settings).put(save_settings))
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
@@ -36,11 +41,12 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/hosts/{id}", put(update_host).delete(remove_host))
         .route("/hosts/{id}/connect", post(connect_host))
         .route("/hosts/{id}/disconnect", post(disconnect_host))
-        .route("/hosts/{id}/reveal", post(reveal_host))
+
         .route("/sessions", get(get_sessions))
         .route("/sessions/{id}/close", post(close_session))
         .route("/sessions/{id}/attach", get(attach_session))
         .route("/audit", get(get_audit))
+        .route_layer(middleware::from_fn_with_state(state.clone(), verify_gateway_identity))
         .with_state(state);
 
     Router::new()
@@ -111,8 +117,50 @@ async fn save_settings(State(st): State<Shared>, Json(req): Json<SettingsRequest
     std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, file))
         .map_err(|e| ApiError(ConnectorError::new(ErrorCode::BadRequest, e.to_string())))?;
     st.audit.record(crate::audit::AuditLog::entry("mcp_idle_timeout_update").with_detail(json!({"minutes":req.mcp_idle_timeout_minutes})));
-    st.vault.lock_management();
     get_settings(State(st)).await
+}
+
+async fn verify_gateway_identity(State(st): State<Shared>, req: Request, next: Next) -> Response {
+    let file = match std::env::var("CREDENTIAL_VAULT_GATEWAY_AUTH_FILE") {
+        Ok(path) => path,
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "统一登录认证尚未配置").into_response(),
+    };
+    let secret = match std::fs::read_to_string(file) { Ok(s) => s, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    let cookie = req.headers().get("cookie").and_then(|v|v.to_str().ok()).unwrap_or("");
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).redirect(reqwest::redirect::Policy::none()).build() {
+        Ok(c) => c, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let identity = client.get("http://container-login-gateway:8080/internal/session/verify")
+        .header("X-Internal-Auth", secret.trim()).header("Cookie", cookie).send().await;
+    if !identity.is_ok_and(|r|r.status().is_success()) {
+        st.vault.lock_management();
+        return (StatusCode::UNAUTHORIZED, "请先通过容器统一登录网关登录").into_response();
+    }
+    if req.method()!=axum::http::Method::GET && req.method()!=axum::http::Method::HEAD {
+        let origin = req.headers().get("origin").and_then(|v|v.to_str().ok()).and_then(|s|reqwest::Url::parse(s).ok());
+        let host = req.headers().get("host").and_then(|v|v.to_str().ok()).unwrap_or("");
+        let authority = origin.as_ref().map(|u| match u.port() {Some(port)=>format!("{}:{port}",u.host_str().unwrap_or("")),None=>u.host_str().unwrap_or("").to_string()});
+        if authority.as_deref()!=Some(host) {return StatusCode::FORBIDDEN.into_response();}
+    }
+    next.run(req).await
+}
+
+#[derive(Deserialize)]
+struct GrantRequest { enabled: bool }
+async fn management_grant(State(st): State<Shared>, Json(req): Json<GrantRequest>) -> ApiResult {
+    if req.enabled {st.vault.open_management_grant().map_err(ApiError::from)?;} else {st.vault.lock_management();}
+    Ok(Json(json!({"enabled":st.vault.is_management_unlocked(),"remaining_seconds":st.vault.management_remaining_seconds()})))
+}
+async fn registry_list(State(st): State<Shared>) -> ApiResult {
+    Ok(Json(json!({"services":st.vault.service_metadata().map_err(ApiError::from)?})))
+}
+async fn registry_save(State(st): State<Shared>, Json(record): Json<crate::services::ServiceRecord>) -> ApiResult {
+    st.vault.put_service_record(record).map_err(ApiError::from)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn registry_delete(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
+    st.vault.remove_service_record(&id).map_err(ApiError::from)?;
+    Ok(Json(json!({"ok":true})))
 }
 
 // --- Vault / status ---

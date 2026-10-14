@@ -1,9 +1,10 @@
 FROM rust:1.89-bookworm AS builder
 WORKDIR /src
 COPY . .
-RUN cargo test --locked management_grant && cargo test --locked mcp_idle_timeout && cargo build --release --locked
+RUN cargo generate-lockfile && cargo test --locked && cargo build --release --locked
 
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends gh git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --create-home --home-dir /home/ssh-connector sshconnector
 WORKDIR /app
 COPY --from=builder /src/target/release/ssh-connector /usr/local/bin/ssh-connector
