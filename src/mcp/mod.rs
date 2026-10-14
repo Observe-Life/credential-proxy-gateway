@@ -422,6 +422,9 @@ fn merge_variants_into_object(
     map.remove("required");
 }
 
+#[derive(serde::Serialize, JsonSchema)]
+pub struct CredentialResponse { pub result: Value }
+
 #[derive(Deserialize, JsonSchema)]
 pub struct ServiceCall {
     pub service_id: String,
@@ -434,9 +437,9 @@ pub struct ServiceId { pub id: String }
 #[tool_router]
 impl McpServer {
     #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证代理保险箱网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
-    async fn credential_registry(&self) -> Result<Json<Value>, ErrorData> {
+    async fn credential_registry(&self) -> Result<Json<CredentialResponse>, ErrorData> {
         let records = self.state.vault.service_metadata().map_err(err_to_mcp)?;
-        Ok(Json(serde_json::json!({"services":records,"management_open":self.state.vault.is_management_unlocked(),"remaining_seconds":self.state.vault.management_remaining_seconds()})))
+        Ok(Json(CredentialResponse { result:serde_json::json!({"services":records,"management_open":self.state.vault.is_management_unlocked(),"remaining_seconds":self.state.vault.management_remaining_seconds()}) }))
     }
     #[tool(description = "新增或修改MCP注册、工具列表、调用注意事项及写入凭据。必须先由用户在网页打开临时开关；凭据永不回显。留空credential保留原值。")]
     async fn credential_register(&self, Parameters(record): Parameters<crate::services::ServiceRecord>) -> Result<Json<OkResult>, ErrorData> {
@@ -444,9 +447,9 @@ impl McpServer {
         Ok(Json(OkResult { ok:true }))
     }
     #[tool(description = "调用凭证代理保险箱中已注册的MCP工具。service_id/tool/arguments按credential_registry返回的工具和注意事项填写。程序附加凭据，模型不接收密钥。支持Exa、豆包、微信公众号、GitHub；GitHub用gh_status/gh_run/gh_git。")]
-    async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<Value>, ErrorData> {
+    async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<CredentialResponse>, ErrorData> {
         let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool, req.arguments).await.map_err(err_to_mcp)?;
-        Ok(Json(output))
+        Ok(Json(CredentialResponse { result:output }))
     }
     #[tool(description = "删除MCP注册。用户须在网页打开30分钟临时管理开关。")]
     async fn credential_remove(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
