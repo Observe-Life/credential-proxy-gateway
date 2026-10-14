@@ -23,9 +23,10 @@
   --color-error-bg: #ffdad6;
   --color-info: #1565c0;
   --color-info-bg: #e3f0ff;
-  --font-literary: "Songti SC", "Noto Serif SC", "LXGW WenKai GB", Georgia, serif;
-  --font-ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
-  --font-mono: "SFMono-Regular", "Maple Mono NL CN", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  /* 全站统一使用系统字体，不加载或指定其他字体 */
+  --font-ui: system-ui, sans-serif;
+  --font-literary: system-ui, sans-serif;
+  --font-mono: system-ui, sans-serif;
   --radius: 8px;
   --sidebar-w: 252px;
   --shadow-soft: 0 18px 48px rgba(77, 42, 30, 0.10);

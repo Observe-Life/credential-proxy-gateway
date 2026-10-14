@@ -775,7 +775,7 @@ function handleTakeover(sessionId) {
       brightYellow: '#e3b341', brightBlue: '#79c0ff', brightMagenta: '#d2a8ff',
       brightCyan: '#56d4dd', brightWhite: '#f0f6fc',
     },
-    fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace',
+    fontFamily: 'monospace',
     fontSize: 13,
     lineHeight: 1.4,
     cursorBlink: true,
