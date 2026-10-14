@@ -46,7 +46,7 @@
         <li><button class="nav-item" data-view="registry">MCP 注册</button></li>
         <li><button class="nav-item active" data-view="hosts" aria-current="page">&#9638; 主机</button></li>
         <li><button class="nav-item" data-view="sessions">&#9654; 会话</button></li>
-        <li><button class="nav-item" data-view="audit">&#8801; 审计日志</button></li>
+        <li><button class="nav-item" data-view="audit">审计</button></li>
         <li><button class="nav-item" data-view="settings">&#9881; 设置</button></li>
       </ul>
       <div class="sidebar-panel" aria-label="安全边界">
@@ -68,14 +68,15 @@
       <section id="view-registry" class="view hidden"><header class="registry-heading"><h2>MCP 注册</h2><button type="button" class="btn btn-primary" id="registry-new">新增</button></header>
         <p>工具说明可读；凭据加密保存、不回显。新增或修改前打开顶部临时开关。</p>
         <div id="registry-list"></div>
-        <details id="registry-editor"><summary>注册与编辑</summary><form id="registry-form" class="registry-form">
+        <dialog id="registry-editor" aria-labelledby="registry-editor-title"><header class="editor-header"><h2 id="registry-editor-title">编辑 MCP</h2><button id="registry-close" type="button" class="btn" aria-label="关闭编辑">关闭</button></header><form id="registry-form" class="registry-form">
           <label>标识<input name="id" required /></label><label>名称<input name="name" required /></label>
-          <label>接口类型<select name="adapter"><option value="exa">Exa搜索</option><option value="doubao">豆包搜索（国内版）</option><option value="wechat">微信公众号文章</option><option value="github">GitHub</option></select></label>
+          <label>接口类型<select name="interface_type"><option value="remote_mcp">远程 MCP</option><option value="http_api">HTTP API</option><option value="local_program">本地程序</option></select></label>
+          <label>调用方法<select name="invocation_method"></select><small id="invocation-hint"></small></label>
           <label>接口地址<input name="url" /></label><label>凭据<input name="credential" type="password" autocomplete="new-password" placeholder="留空保留原凭据" /></label>
           <label>可用工具（JSON）<textarea name="tools" rows="7">[]</textarea></label>
           <label>调用注意事项<textarea name="notes" rows="5"></textarea></label>
-          <div class="registry-actions"><button class="btn btn-primary">保存注册</button><button type="button" id="registry-cancel" class="btn">收起</button></div><p id="registry-message" role="status" aria-live="polite"></p>
-        </form></details>
+          <div class="registry-actions"><button class="btn btn-primary">保存注册</button><button type="button" id="registry-cancel" class="btn">取消</button></div><p id="registry-message" role="status" aria-live="polite"></p>
+        </form></dialog>
       </section>
       <section id="view-hosts" class="view" aria-label="主机">
         <header class="view-header">
@@ -160,7 +161,7 @@
           <p id="settings-help">范围：5～1440 分钟（24 小时），默认 120 分钟。此项不是 SSH 终端的空闲时间。</p>
           <p id="settings-runtime" role="status"></p>
           <button id="settings-save" type="submit" class="btn btn-primary">保存设置</button>
-          <p>保存需先解锁管理权限；修改后重启连接器生效，已建立的 MCP 会话不会被网页直接断开。</p>
+          <p>打开顶部临时授权后可保存；修改后重启连接器生效，已建立的 MCP 会话不会被网页直接断开。</p>
           <div id="settings-status" role="status" aria-live="polite"></div>
         </form>
       </section>

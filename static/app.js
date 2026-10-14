@@ -1072,7 +1072,7 @@ async function loadSettings() {
   try {
     const v = await apiFetch('GET', '/settings');
     $('mcp-idle-minutes').value = v.saved_minutes;
-    $('settings-runtime').textContent = `当前运行：${v.active_minutes} 分钟；已保存：${v.saved_minutes} 分钟。` + (v.restart_required ? '重启连接器后生效。' : '当前已生效。') + (v.environment_override ? '环境变量正在覆盖网页设置。' : '');
+    $('settings-runtime').textContent = `当前运行：${v.active_minutes} 分钟\n已保存：${v.saved_minutes} 分钟\n` + (v.restart_required ? '重启连接器后生效。' : '当前已生效。') + (v.environment_override ? '环境变量正在覆盖网页设置。' : '');
     $('settings-save').disabled = !!v.environment_override;
   } catch (e) { $('settings-status').textContent = describeError(e); }
 }
@@ -1083,7 +1083,7 @@ $('settings-form').addEventListener('submit', async e => {
   $('settings-save').disabled = true;
   try {
     await apiFetch('PUT', '/settings', {mcp_idle_timeout_minutes: minutes});
-    $('settings-status').textContent = '设置已保存。修改将在重启连接器后生效。管理权限已重新锁定。';
+    $('settings-status').textContent = '设置已保存。修改将在重启连接器后生效。';
     await loadSettings();
   } catch(e) { $('settings-status').textContent = describeError(e); }
   finally { $('settings-save').disabled = false; }
@@ -1094,10 +1094,19 @@ async function refreshGrant(){
 }
 $('management-grant-switch').addEventListener('change',async e=>{try{await apiFetch('PUT','/management/grant',{enabled:e.target.checked});await refreshGrant();}catch(err){e.target.checked=false;showToast(describeError(err),'error')}});
 setInterval(refreshGrant,10000);
-async function loadRegistry(){
- try {const result=await apiFetch('GET','/registry');$('registry-list').replaceChildren();for(const item of result.services){const node=document.createElement('article'),title=document.createElement('h3'),notes=document.createElement('p'),button=document.createElement('button');title.textContent=item.name;notes.textContent=item.notes;button.textContent='编辑';button.type='button';button.className='btn btn-ghost';button.onclick=()=>{const f=$('registry-form');$('registry-editor').open=true;for(const k of ['id','name','adapter','url','notes'])f.elements[k].value=item[k]||'';f.elements.tools.value=JSON.stringify(item.tools,null,2);f.elements.credential.value='';$('registry-editor').scrollIntoView({behavior:'smooth',block:'start'})};node.append(title,notes,button);$('registry-list').append(node)}await refreshGrant();}catch(e){$('registry-message').textContent=describeError(e)}
-}
-$('registry-form').addEventListener('submit',async e=>{e.preventDefault();const form=e.target;try{const value=Object.fromEntries(new FormData(form));value.tools=JSON.parse(value.tools);await apiFetch('PUT','/registry',value);form.elements.credential.value='';$('registry-message').textContent='已保存，凭据不回显。';await loadRegistry();}catch(err){$('registry-message').textContent=describeError(err)}});
 
-$('registry-new').addEventListener('click',()=>{const form=$('registry-form');form.reset();form.elements.tools.value='[]';$('registry-editor').open=true;$('registry-editor').scrollIntoView({behavior:'smooth',block:'start'});form.elements.id.focus({preventScroll:true});});
-$('registry-cancel').addEventListener('click',()=>{$('registry-editor').open=false;$('registry-new').focus({preventScroll:true});});
+const methodCatalog={remote_mcp:[['exa','Exa 搜索'],['wechat','微信公众号文章']],http_api:[['doubao','豆包搜索（国内版）']],local_program:[['github','GitHub 命令行（gh / git）']]};
+let editorSnapshot='',editorTrigger=null;
+function editorState(){return JSON.stringify(Object.fromEntries(new FormData($('registry-form'))));}
+function updateMethods(selected){const f=$('registry-form');f.elements.invocation_method.replaceChildren(...methodCatalog[f.elements.interface_type.value].map(([v,t])=>new Option(t,v)));if(selected)f.elements.invocation_method.value=selected;$('invocation-hint').textContent=f.elements.interface_type.value==='local_program'?'当前支持命令行适配；标准输入输出 MCP 尚未开放。':'仅显示已经实现并支持的调用方法。';}
+function openEditor(item,trigger){const f=$('registry-form');f.reset();editorTrigger=trigger;for(const k of ['id','name','url','notes'])f.elements[k].value=item?.[k]||'';f.elements.id.readOnly=!!item;f.elements.interface_type.value=item?.interface_type||'remote_mcp';updateMethods(item?.invocation_method||item?.adapter);f.elements.tools.value=JSON.stringify(item?.tools||[],null,2);f.elements.credential.value='';$('registry-message').textContent='';$('registry-editor-title').textContent=item?'编辑 MCP':'新增 MCP';editorSnapshot=editorState();$('registry-editor').showModal();document.body.classList.add('editor-open');}
+function closeEditor(force=false){if(!force&&editorState()!==editorSnapshot&&!confirm('有未保存的修改，确定放弃吗？'))return;$('registry-editor').close();document.body.classList.remove('editor-open');editorTrigger?.focus({preventScroll:true});}
+$('registry-form').elements.interface_type.addEventListener('change',()=>updateMethods());
+$('registry-close').addEventListener('click',()=>closeEditor());
+$('registry-cancel').addEventListener('click',()=>closeEditor());
+$('registry-editor').addEventListener('cancel',e=>{e.preventDefault();closeEditor();});
+$('registry-new').addEventListener('click',e=>openEditor(null,e.currentTarget));
+async function loadRegistry(){
+ try{const result=await apiFetch('GET','/registry');$('registry-list').replaceChildren();for(const item of result.services){const node=document.createElement('article'),title=document.createElement('h3'),notes=document.createElement('p'),button=document.createElement('button');title.textContent=item.name;notes.textContent=item.notes;button.textContent='编辑';button.type='button';button.className='btn btn-ghost';button.onclick=()=>openEditor(item,button);node.append(title,notes,button);$('registry-list').append(node)}await refreshGrant();}catch(e){showToast(describeError(e),'error')}
+}
+$('registry-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type="submit"],button.btn-primary');b.disabled=true;try{const value=Object.fromEntries(new FormData(f));value.adapter=value.invocation_method;value.tools=JSON.parse(value.tools);await apiFetch('PUT','/registry',value);f.elements.credential.value='';closeEditor(true);showToast('注册已保存，凭据不回显');await loadRegistry();}catch(err){$('registry-message').textContent=describeError(err)}finally{b.disabled=false}});

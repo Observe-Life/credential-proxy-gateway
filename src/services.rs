@@ -10,17 +10,26 @@ pub struct ServiceRecord {
     pub id: String,
     pub name: String,
     pub adapter: String,
+    #[serde(default)] pub interface_type: String,
+    #[serde(default)] pub invocation_method: String,
     #[serde(default)] pub url: String,
     #[serde(default)] pub credential: String,
     #[serde(default)] pub tools: Value,
     #[serde(default)] pub notes: String,
 }
 impl ServiceRecord {
+    pub fn connection_type(&self) -> &str {
+        match self.adapter.as_str() { "exa"|"wechat"=>"remote_mcp", "doubao"=>"http_api", "github"=>"local_program", _=>"unsupported" }
+    }
     pub fn metadata(&self) -> Value {
-        json!({"id":self.id,"name":self.name,"adapter":self.adapter,"url":self.url,
+        json!({"id":self.id,"name":self.name,"adapter":self.adapter,"interface_type":self.connection_type(),"invocation_method":self.adapter,"url":self.url,
             "tools":self.tools,"notes":self.notes,"has_credential":!self.credential.is_empty()})
     }
     pub fn validate(&self) -> Result<()> {
+        if (!self.interface_type.is_empty() && self.interface_type != self.connection_type()) ||
+           (!self.invocation_method.is_empty() && self.invocation_method != self.adapter) {
+            return Err(ConnectorError::new(ErrorCode::BadRequest,"接口类型与调用方法不匹配"));
+        }
         if self.id.is_empty() || self.id.len()>64 || !self.id.chars().all(|c| c.is_ascii_alphanumeric()||c=='-'||c=='_') {
             return Err(ConnectorError::new(ErrorCode::BadRequest,"invalid registration id"));
         }
@@ -105,3 +114,15 @@ fn parse_command(s:&str)->Result<Vec<String>> {
     if escape||quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"unclosed command quoting"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"empty command"))}Ok(words)
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn service_arguments_and_redaction(){assert_eq!(parse_command("issue create --title '中文 标题'").unwrap(),vec!["issue","create","--title","中文 标题"]);assert!(parse_command("'unclosed").is_err());assert_eq!(redact("Bearer secret","secret"),"Bearer [凭据已隐藏]");let mut v=json!({"title":"<em class=\"highlight\">中文</em>","date":0});clean_wechat(&mut v);assert_eq!(v["title"],"中文");assert!(v.get("date_local").is_some());}}
+
+#[cfg(test)] mod interface_tests {
+    use super::*;
+    #[test] fn legacy_metadata_and_type_validation() {
+        for (method, kind) in [("exa","remote_mcp"),("wechat","remote_mcp"),("doubao","http_api"),("github","local_program")] {
+            let mut record: ServiceRecord = serde_json::from_value(json!({"id":"test","name":"test","adapter":method,"url":"https://example.com/mcp"})).unwrap();
+            assert_eq!(record.metadata()["interface_type"],kind);
+            record.interface_type=kind.into(); record.invocation_method=method.into();assert!(record.validate().is_ok());
+            record.interface_type="wrong".into();assert!(record.validate().is_err());
+        }
+    }
+}

@@ -755,7 +755,7 @@ mod service_registry_tests {
         let vault = Vault::open(&dir.join("vault.db"), &dir.join("runtime-key")).unwrap();
         vault.init("test-master-password").unwrap();
         vault.lock_management();
-        let mut record = ServiceRecord { id:"github".into(), name:"GitHub".into(), adapter:"github".into(), url:String::new(), credential:"secret-registry-test".into(), tools:serde_json::json!(["gh_status"]), notes:"test".into() };
+        let mut record = ServiceRecord { id:"github".into(), name:"GitHub".into(), adapter:"github".into(), interface_type:String::new(), invocation_method:String::new(), url:String::new(), credential:"secret-registry-test".into(), tools:serde_json::json!(["gh_status"]), notes:"test".into() };
         assert!(vault.put_service_record(record.clone()).is_err());
         vault.open_management_grant().unwrap();
         vault.put_service_record(record.clone()).unwrap();
