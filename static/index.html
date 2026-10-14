@@ -62,8 +62,8 @@
     <main id="content" class="content">
       <!-- HOSTS VIEW -->
       <section class="grant-bar" aria-label="临时授权">
-        <label class="grant-toggle"><input type="checkbox" id="management-grant-switch" role="switch" /> <span>临时管理授权</span></label>
-        <span class="grant-help">开关打开30分钟后自动关闭</span><span id="management-countdown" role="status"></span>
+        <label class="grant-toggle"><input type="checkbox" id="management-grant-switch" role="switch" aria-describedby="management-grant-help" /><span class="grant-switch-track" aria-hidden="true"></span><span>允许智能体管理凭据</span></label>
+        <span id="management-grant-help" class="grant-help">开关打开30分钟后自动关闭</span><span id="management-countdown" role="status"></span>
       </section>
       <section id="view-registry" class="view hidden"><header class="registry-heading"><h2>MCP 注册</h2><button type="button" class="btn btn-primary" id="registry-new">新增</button></header>
         <p>工具说明可读；凭据加密保存、不回显。新增或修改前打开顶部临时开关。</p>
