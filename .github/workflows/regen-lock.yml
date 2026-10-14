@@ -1,0 +1,40 @@
+name: Regenerate Cargo.lock
+
+# Temporary helper for the rmcp session-gone 404 patch.
+# It refreshes Cargo.lock for the git-pinned rmcp patch and verifies that the
+# patch compiles, then commits the refreshed lock back to the same branch.
+# Delete this workflow once Cargo.lock is committed.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/session-gone-404
+
+      - name: Refresh Cargo.lock for the pinned rmcp patch
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          git diff --stat Cargo.lock
+
+      - name: Compile-check including the patched rmcp
+        run: cargo check --release
+
+      - name: Commit Cargo.lock
+        run: |
+          if git diff --quiet Cargo.lock; then
+            echo "Cargo.lock already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "build: regenerate Cargo.lock for the pinned rmcp patch"
+          git push
