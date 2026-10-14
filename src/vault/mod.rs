@@ -310,6 +310,12 @@ impl Vault {
         ids.iter().map(|id| self.get_service_record(id).map(|r| r.metadata())).collect()
     }
 
+    /// Plaintext credential for the human-only web reveal path. Never exposed
+    /// through an MCP tool, and never written to logs or audit details.
+    pub fn service_credential(&self, id: &str) -> Result<String> {
+        Ok(self.get_service_record(id)?.credential)
+    }
+
     pub fn remove_service_record(&self, id: &str) -> Result<()> {
         self.require_management()?;
         self.service_table()?;

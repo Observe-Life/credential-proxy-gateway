@@ -33,6 +33,7 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/management/grant", put(management_grant))
         .route("/registry", get(registry_list).put(registry_save))
         .route("/registry/{id}", axum::routing::delete(registry_delete))
+        .route("/registry/{id}/credential", get(reveal_service_credential))
         .route("/settings", get(get_settings).put(save_settings))
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
@@ -41,6 +42,7 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/hosts/{id}", put(update_host).delete(remove_host))
         .route("/hosts/{id}/connect", post(connect_host))
         .route("/hosts/{id}/disconnect", post(disconnect_host))
+        .route("/hosts/{id}/reveal", post(reveal_host))
 
         .route("/sessions", get(get_sessions))
         .route("/sessions/{id}/close", post(close_session))
@@ -244,26 +246,27 @@ async fn disconnect_host(State(st): State<Shared>, Path(id): Path<String>) -> Ap
     Ok(Json(json!({ "status": "disconnected" })))
 }
 
-async fn reveal_host(
-    State(st): State<Shared>,
-    Path(id): Path<String>,
-    Json(req): Json<MasterPassword>,
-) -> ApiResult {
-    // Human-only, master-password-gated credential reveal.
-    let (auth, jumps) = st
-        .vault
-        .reveal_credentials(&id, &req.master_password)
-        .map_err(ApiError::from)?;
-    st.vault.lock_management();
+async fn reveal_host(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
+    // Human-only reveal: the gateway-identity middleware already proved that a
+    // logged-in browser sent this request, so no second password is required.
+    // No MCP tool reaches this route, and the value is never logged.
+    let cfg = st.vault.get_host_config(&id).map_err(ApiError::from)?;
     st.audit.record(
         crate::audit::AuditLog::entry("credential_reveal")
             .with_host(&id)
             .with_detail(json!({ "source": "web" })),
     );
-    Ok(Json(json!({ "auth": auth, "jump_hosts": jumps })))
+    Ok(Json(json!({ "auth": cfg.auth, "jump_hosts": cfg.jump_hosts })))
 }
 
-// --- Sessions ---
+async fn reveal_service_credential(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
+    let credential = st.vault.service_credential(&id).map_err(ApiError::from)?;
+    st.audit.record(
+        crate::audit::AuditLog::entry("mcp_credential_reveal")
+            .with_detail(json!({ "source": "web", "service": id })),
+    );
+    Ok(Json(json!({ "credential": credential })))
+}
 
 async fn get_sessions(State(st): State<Shared>) -> ApiResult {
     let sessions = st.list_sessions().await;
