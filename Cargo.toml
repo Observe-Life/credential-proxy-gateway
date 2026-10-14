@@ -32,3 +32,13 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 vt100 = "0.16.2"
 zeroize = { version = "1.8.2", features = ["derive"] }
+
+# Local patch: the MCP Streamable HTTP spec requires a request that carries an
+# `Mcp-Session-Id` for a terminated or unknown session to be answered with
+# `404 Not Found`, so the client starts a new session (re-initializes).
+# Upstream rmcp maps that case to `500` (still true through rmcp 3.5.1), which
+# makes standard clients break permanently instead of recovering.
+# Patch branch: https://github.com/Observe-Life/rust-sdk (rmcp-v1.7.0-session-404)
+# Retire this patch once upstream returns 404 for terminated sessions itself.
+[patch.crates-io]
+rmcp = { git = "https://github.com/Observe-Life/rust-sdk", rev = "026306469db833e9f0b524c5cdab757576c070f3" }
