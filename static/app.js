@@ -71,6 +71,7 @@ const el = {
   hfHost:           () => $('hf-host'),
   hfPort:           () => $('hf-port'),
   hfUser:           () => $('hf-user'),
+  hfNotes:          () => $('hf-notes'),
   hfPassword:       () => $('hf-password'),
   hfKeyPem:         () => $('hf-key-pem'),
   hfKeyPassphrase:  () => $('hf-key-passphrase'),
@@ -404,6 +405,7 @@ function openHostModal(existingHost) {
     el.hfHost().value  = existingHost.host  || '';
     el.hfPort().value  = existingHost.port  || 22;
     el.hfUser().value  = existingHost.user  || '';
+    el.hfNotes().value = existingHost.notes || '';
     const kind = existingHost.auth_kind || 'password';
     const radio = modal.querySelector(`input[name="auth-type"][value="${kind}"]`);
     if (radio) { radio.checked = true; syncAuthFields(kind); }
@@ -419,6 +421,7 @@ function openHostModal(existingHost) {
     el.hfHost().value  = '';
     el.hfPort().value  = 22;
     el.hfUser().value  = '';
+    el.hfNotes().value = '';
     el.hfPassword().value = '';
     el.hfKeyPem().value = '';
     el.hfKeyPassphrase().value = '';
@@ -530,6 +533,7 @@ async function handleHostFormSubmit(e) {
   const host  = el.hfHost().value.trim();
   const port  = parseInt(el.hfPort().value, 10) || 22;
   const user  = el.hfUser().value.trim();
+  const notes = el.hfNotes().value.trim();
   if (!alias || !host || !user) {
     showFormError(el.hostFormError(), '别名、主机名和用户名不能为空。');
     return;
@@ -554,7 +558,7 @@ async function handleHostFormSubmit(e) {
     const v = row.querySelector('.env-value').value;
     if (k) env[k] = v;
   });
-  const body = { alias, host, port, user, auth, jump_hosts: jumpHosts, env };
+  const body = { alias, host, port, user, notes, auth, jump_hosts: jumpHosts, env };
   if (el.hfBecomeRootEnabled().checked) {
     const password = el.hfBecomeRootPassword().value;
     if (!password) {
@@ -871,7 +875,7 @@ function renderAudit(entries) {
   entries.forEach((entry) => {
     const div = document.createElement('div');
     div.className = 'audit-entry';
-    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : (entry.ts || '');
+    const ts = formatAuditTime(entry.ts || entry.timestamp || '');
     const rawAction = entry.action || entry.event || JSON.stringify(entry).slice(0, 80);
     const action = auditActionLabel(rawAction);
     const host = entry.host || entry.alias || entry.host_id || '';
@@ -883,6 +887,17 @@ function renderAudit(entries) {
       <span class="audit-host">${escHtml(host)}</span>
       <span class="audit-detail">${escHtml(detail)} ${escHtml(exitCode)}</span>`;
     list.appendChild(div);
+  });
+}
+
+function formatAuditTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
 }
 
