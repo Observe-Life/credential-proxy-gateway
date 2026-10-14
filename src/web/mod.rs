@@ -122,6 +122,7 @@ async fn status(State(st): State<Shared>) -> ApiResult {
         "vault_initialized": st.vault.is_initialized().map_err(ApiError::from)?,
         "vault_unlocked": st.vault.is_unlocked(),
         "management_unlocked": st.vault.is_management_unlocked(),
+        "management_remaining_seconds": st.vault.management_remaining_seconds(),
         "version": env!("CARGO_PKG_VERSION"),
     })))
 }

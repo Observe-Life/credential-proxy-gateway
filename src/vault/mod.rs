@@ -18,9 +18,36 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use zeroize::Zeroizing;
+
+const MANAGEMENT_GRANT_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Default)]
+struct ManagementGrant {
+    expires_at: Option<Instant>,
+}
+
+impl ManagementGrant {
+    fn open(&mut self, now: Instant) {
+        self.expires_at = Some(now + MANAGEMENT_GRANT_TTL);
+    }
+
+    fn remaining_seconds(&self, now: Instant) -> u64 {
+        self.expires_at.and_then(|end| end.checked_duration_since(now))
+            .map(|duration| duration.as_secs()).unwrap_or(0)
+    }
+
+    fn is_open(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|end| end > now)
+    }
+
+    fn close(&mut self) {
+        self.expires_at = None;
+    }
+}
 
 const DEK_LEN: usize = 32;
 const SALT_LEN: usize = 16;
@@ -83,7 +110,7 @@ struct Unlocked {
 pub struct Vault {
     conn: Mutex<Connection>,
     unlocked: Mutex<Option<Unlocked>>,
-    management_unlocked: Mutex<bool>,
+    management_unlocked: Mutex<ManagementGrant>,
     runtime_key_path: std::path::PathBuf,
 }
 
@@ -129,7 +156,7 @@ impl Vault {
         } else { None };
         Ok(Vault {
             conn: Mutex::new(conn),
-            management_unlocked: Mutex::new(false),
+            management_unlocked: Mutex::new(ManagementGrant::default()),
             runtime_key_path,
             unlocked: Mutex::new(unlocked),
         })
@@ -150,7 +177,14 @@ impl Vault {
     }
 
     pub fn is_management_unlocked(&self) -> bool {
-        self.management_unlocked.lock().map(|g| *g).unwrap_or(false)
+        self.management_unlocked.lock().map(|g| g.is_open(Instant::now())).unwrap_or(false)
+    }
+
+    /// Remaining lifetime of the human-authorized management grant.
+    /// This exposes only a duration, never credential material.
+    pub fn management_remaining_seconds(&self) -> u64 {
+        self.management_unlocked.lock()
+            .map(|grant| grant.remaining_seconds(Instant::now())).unwrap_or(0)
     }
 
     fn save_runtime_key(&self, dek: &[u8; DEK_LEN]) -> Result<()> {
@@ -193,7 +227,7 @@ impl Vault {
         dek_arr.copy_from_slice(&dek);
         self.save_runtime_key(&dek_arr)?;
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = Some(Unlocked { dek: dek_arr });
-        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).open(Instant::now());
         Ok(())
     }
 
@@ -220,18 +254,18 @@ impl Vault {
         dek_arr.copy_from_slice(&dek);
         self.save_runtime_key(&dek_arr)?;
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = Some(Unlocked { dek: dek_arr });
-        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).open(Instant::now());
         Ok(())
     }
 
     /// Forget the in-memory DEK.
     pub fn lock(&self) {
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).close();
     }
 
     pub fn lock_management(&self) {
-        *self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        self.management_unlocked.lock().unwrap_or_else(|p| p.into_inner()).close();
     }
 
     /// Run a closure with the live DEK, or fail if locked.
@@ -630,5 +664,32 @@ mod tests {
         // second record is ignored (TOFU keeps first)
         v.record_host_key("h", 22, "SHA256:different").unwrap();
         assert_eq!(v.get_host_key("h", 22).unwrap().unwrap(), "SHA256:abc");
+    }
+}
+
+#[cfg(test)]
+mod management_grant_tests {
+    use super::*;
+
+    #[test]
+    fn management_grant_defaults_closed_and_expires_after_30_minutes() {
+        let start = Instant::now();
+        let mut grant = ManagementGrant::default();
+        assert!(!grant.is_open(start));
+        grant.open(start);
+        assert_eq!(grant.remaining_seconds(start), 1800);
+        assert!(grant.is_open(start + Duration::from_secs(1799)));
+        assert!(!grant.is_open(start + Duration::from_secs(1800)));
+        assert_eq!(grant.remaining_seconds(start + Duration::from_secs(1801)), 0);
+    }
+
+    #[test]
+    fn management_grant_manual_close_and_restart_do_not_keep_authority() {
+        let start = Instant::now();
+        let mut grant = ManagementGrant::default();
+        grant.open(start);
+        grant.close();
+        assert!(!grant.is_open(start));
+        assert!(!ManagementGrant::default().is_open(start));
     }
 }
