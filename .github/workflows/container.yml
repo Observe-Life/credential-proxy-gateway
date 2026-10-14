@@ -49,3 +49,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Notify owner via ServerChan
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          SERVERCHAN_NOTIFY_URL: ${{ secrets.SERVERCHAN_NOTIFY_URL }}
+          BUILD_STATUS: ${{ job.status }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, urllib.request, urllib.parse
+          endpoint = os.environ.get("SERVERCHAN_NOTIFY_URL", "")
+          if not endpoint:
+              print("Notification secret is not configured")
+              raise SystemExit(0)
+          status = os.environ["BUILD_STATUS"]
+          title = "凭证代理保险箱构建：" + {"success":"成功", "failure":"失败", "cancelled":"取消"}.get(status, status)
+          body = urllib.parse.urlencode({"title":title, "desp":"构建结果："+status+"\n提交："+os.environ["BUILD_COMMIT"]+"\n详情："+os.environ["RUN_URL"]}).encode()
+          try:
+              with urllib.request.urlopen(urllib.request.Request(endpoint, data=body), timeout=20) as response:
+                  print("Notification HTTP status:", response.status)
+          except Exception:
+              print("Notification delivery failed; check service availability")
+              raise SystemExit(1)
+          PY
