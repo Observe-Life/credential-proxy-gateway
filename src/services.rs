@@ -3,7 +3,7 @@ use crate::{state::AppState, error::{ConnectorError, ErrorCode, Result}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use schemars::JsonSchema;
-use std::sync::Arc;
+use std::collections::HashMap;use std::sync::{Arc,OnceLock};use tokio::sync::{Mutex as AsyncMutex,Semaphore};
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ServiceRecord {
@@ -95,25 +95,78 @@ pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,mut args:Value)->Result<V
     };
     let text=redact(&result.to_string(),&record.credential);serde_json::from_str(&text).map_err(|_|internal("result normalization failed"))
 }
+/// GitHub 子进程的全局限流闸门。上限可用 GITHUB_MAX_CONCURRENCY 覆盖（1..=64，默认 4）。
+/// 没有它时，一口气来 10 个调用就会同时起 10 个进程，容易把 CPU/内存打满。
+fn github_gate()->&'static Semaphore{
+    static GATE:OnceLock<Semaphore>=OnceLock::new();
+    GATE.get_or_init(||{let n=std::env::var("GITHUB_MAX_CONCURRENCY").ok().and_then(|v|v.parse::<usize>().ok()).filter(|n|(1..=64).contains(n)).unwrap_or(4);Semaphore::new(n)})
+}
+/// 按工作目录加闸：**不同仓库并行、同一仓库排队**。
+/// 直接并发操作同一仓库会撞 .git/index.lock，所以并发要靠这个粒度而不是一把大锁。
+fn dir_gate(dir:&str)->Arc<AsyncMutex<()>>{
+    static DIRS:OnceLock<std::sync::Mutex<HashMap<String,Arc<AsyncMutex<()>>>>> =OnceLock::new();
+    let dirs=DIRS.get_or_init(||std::sync::Mutex::new(HashMap::new()));
+    let mut guard=dirs.lock().unwrap_or_else(|e|e.into_inner());
+    guard.entry(dir.to_string()).or_insert_with(||Arc::new(AsyncMutex::new(()))).clone()
+}
 async fn github_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
+    let cwd=args.get("cwd").and_then(Value::as_str).unwrap_or("/app/data/github").to_string();
+    let _permit=github_gate().acquire().await.map_err(|_|internal("GitHub concurrency gate unavailable"))?;
+    let dir=dir_gate(&cwd);let _dir_guard=dir.lock().await;
     let mut cmd=match tool{"gh_git"=>tokio::process::Command::new("git"),"gh_run"|"gh_status"=>tokio::process::Command::new("gh"),_=>return Err(ConnectorError::new(ErrorCode::BadRequest,"unknown GitHub tool"))};
     if tool=="gh_status"{cmd.args(["auth","status"]);}else{
         let command=args.get("command").and_then(Value::as_str).ok_or_else(||ConnectorError::new(ErrorCode::BadRequest,"command required"))?;
         let argv=parse_command(command)?;cmd.args(argv);
     }
-    let cwd=args.get("cwd").and_then(Value::as_str).unwrap_or("/app/data/github");tokio::fs::create_dir_all(cwd).await.map_err(|_|internal("GitHub work directory unavailable"))?;cmd.current_dir(cwd);
+    tokio::fs::create_dir_all(&cwd).await.map_err(|_|internal("GitHub work directory unavailable"))?;cmd.current_dir(&cwd);
     cmd.env("GH_TOKEN",&s.credential).env("GH_PROMPT_DISABLED","1").env("GH_PAGER","cat").env("GIT_PAGER","cat").env("GIT_TERMINAL_PROMPT","0");
-    if tool=="gh_git"{cmd.env("GIT_CONFIG_COUNT","1").env("GIT_CONFIG_KEY_0","credential.helper").env("GIT_CONFIG_VALUE_0","!gh auth git-credential");}
+    if tool=="gh_git"{
+        // git 的默认配置：凭据助手 + 目录信任 + 提交身份。
+        // 这些以前要每次手工 config，现在由程序注入，调用方不用管。
+        cmd.env("GIT_CONFIG_COUNT","4")
+            .env("GIT_CONFIG_KEY_0","credential.helper").env("GIT_CONFIG_VALUE_0","!gh auth git-credential")
+            .env("GIT_CONFIG_KEY_1","safe.directory").env("GIT_CONFIG_VALUE_1","*")
+            .env("GIT_CONFIG_KEY_2","user.name").env("GIT_CONFIG_VALUE_2","vault-connector")
+            .env("GIT_CONFIG_KEY_3","user.email").env("GIT_CONFIG_VALUE_3","vault@localhost");
+    }
     let timeout=args.get("timeout").and_then(Value::as_u64).unwrap_or(120).clamp(1,10800);cmd.kill_on_drop(true);
     let output=tokio::time::timeout(std::time::Duration::from_secs(timeout),cmd.output()).await.map_err(|_|internal("GitHub command timed out"))?.map_err(|_|internal("GitHub executable failed"))?;
     Ok(json!({"exit_code":output.status.code(),"stdout":redact(&String::from_utf8_lossy(&output.stdout),&s.credential),"stderr":redact(&String::from_utf8_lossy(&output.stderr),&s.credential)}))
 }
+/// 拆命令：空白分词，单/双引号成对包裹。
+/// 注意反斜杠**不再**当转义符：旧实现会把 `\u517c`、`C:\path`、正则 `\d` 里的反斜杠静默吃掉，
+/// 造成参数被悄悄改坏。唯一保留的转义是双引号里的 `\"`，用来表达字面双引号。
 fn parse_command(s:&str)->Result<Vec<String>> {
-    let mut words=Vec::new();let mut word=String::new();let mut quote=None;let mut escape=false;let mut started=false;
-    for c in s.chars(){if escape {word.push(c);escape=false;started=true;continue}if c=='\\'&&quote!=Some('\''){escape=true;started=true;continue}if let Some(q)=quote{if c==q{quote=None}else{word.push(c)}started=true;}else if c=='\''||c=='"'{quote=Some(c);started=true;}else if c.is_whitespace(){if started{words.push(std::mem::take(&mut word));started=false}}else{word.push(c);started=true}}
-    if escape||quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"unclosed command quoting"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"empty command"))}Ok(words)
+    let mut words=Vec::new();let mut word=String::new();let mut quote:Option<char>=None;let mut started=false;let mut chars=s.chars().peekable();
+    while let Some(c)=chars.next(){
+        match quote{
+            Some(q)=>{
+                if c=='\\'&&q=='"'&&chars.peek()==Some(&'"'){word.push('"');chars.next();}
+                else if c==q{quote=None;}
+                else{word.push(c);}
+                started=true;
+            }
+            None=>{
+                if c=='\''||c=='"'{quote=Some(c);started=true;}
+                else if c.is_whitespace(){if started{words.push(std::mem::take(&mut word));started=false;}}
+                else{word.push(c);started=true;}
+            }
+        }
+    }
+    if quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"unclosed command quoting"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"empty command"))}Ok(words)
 }
-#[cfg(test)]mod tests{use super::*;#[test]fn service_arguments_and_redaction(){assert_eq!(parse_command("issue create --title '中文 标题'").unwrap(),vec!["issue","create","--title","中文 标题"]);assert!(parse_command("'unclosed").is_err());assert_eq!(redact("Bearer secret","secret"),"Bearer [凭据已隐藏]");let mut v=json!({"title":"<em class=\"highlight\">中文</em>","date":0});clean_wechat(&mut v);assert_eq!(v["title"],"中文");assert!(v.get("date_local").is_some());}}
+#[cfg(test)]mod tests{use super::*;
+#[test]fn command_parser_keeps_backslashes(){
+    // 反斜杠必须原样保留：旧实现会吞掉它，导致 `-f message=\u517c` 变成 `u517c`
+    assert_eq!(parse_command(r"--jq .a\b").unwrap(),vec!["--jq",r".a\b"]);
+    assert_eq!(parse_command(r#"--notes "\u517c 容""#).unwrap(),vec!["--notes",r"\u517c 容"]);
+    assert_eq!(parse_command(r"--path C:\tmp\repo").unwrap(),vec!["--path",r"C:\tmp\repo"]);
+    // 双引号内的 \" 仍表示字面双引号
+    assert_eq!(parse_command(r#"--notes "a\"b""#).unwrap(),vec!["--notes","a\"b"]);
+    assert!(parse_command("  ").is_err());
+    assert!(parse_command("'unclosed").is_err());
+}
+#[test]fn service_arguments_and_redaction(){assert_eq!(parse_command("issue create --title '中文 标题'").unwrap(),vec!["issue","create","--title","中文 标题"]);assert!(parse_command("'unclosed").is_err());assert_eq!(redact("Bearer secret","secret"),"Bearer [凭据已隐藏]");let mut v=json!({"title":"<em class=\"highlight\">中文</em>","date":0});clean_wechat(&mut v);assert_eq!(v["title"],"中文");assert!(v.get("date_local").is_some());}}
 
 #[cfg(test)] mod interface_tests {
     use super::*;

@@ -41,10 +41,10 @@
         <span class="brand-name">凭证代理保险箱</span>
       </div>
       <ul class="nav-list" role="list">
-        <li><button class="nav-item active" data-view="registry" aria-current="page">MCP</button></li>
-        <li><button class="nav-item" data-view="hosts">&#9638; SSH</button></li>
-        <li><button class="nav-item" data-view="audit">&#8801; 审计</button></li>
-        <li><button class="nav-item" data-view="settings">&#9881; 设置</button></li>
+        <li><button class="nav-item active" data-view="registry" aria-current="page"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.6"/><rect x="11" y="11" width="6.5" height="6.5" rx="1.6"/><path d="M9 5.8h1.8a2.4 2.4 0 0 1 2.4 2.4v2.4"/></svg>MCP</button></li>
+        <li><button class="nav-item" data-view="hosts"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="M6 8.6l2.6 2L6 12.6"/><path d="M11 12.8h3.6"/></svg>SSH</button></li>
+        <li><button class="nav-item" data-view="audit"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 6h9M7 10h9M7 14h6"/><path d="M4 5.4h.01M4 9.4h.01M4 13.4h.01"/></svg>审计</button></li>
+        <li><button class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.2h12M4 10h12M4 13.8h12"/><circle cx="8.2" cy="6.2" r="1.5"/><circle cx="12.2" cy="10" r="1.5"/><circle cx="6.8" cy="13.8" r="1.5"/></svg>设置</button></li>
       </ul>
       <div class="sidebar-panel" aria-label="安全边界">
         <span class="panel-label">安全边界</span>
@@ -115,14 +115,7 @@
         <div id="hosts-loading" class="loading-state">加载中&hellip;</div>
         <div id="hosts-empty" class="empty-state hidden">还没有配置主机。</div>
         <div id="hosts-table-wrap" class="hidden">
-          <table class="data-table" aria-label="SSH 主机">
-            <thead><tr>
-              <th scope="col">别名</th><th scope="col">主机</th><th scope="col">端口</th>
-              <th scope="col">用户</th><th scope="col">认证</th><th scope="col">跳板</th>
-              <th scope="col">状态</th><th scope="col" class="col-actions">操作</th>
-            </tr></thead>
-            <tbody id="hosts-body"></tbody>
-          </table>
+          <div id="hosts-body" class="host-cards" role="list"></div>
         </div>
       </section>
       <!-- SESSIONS VIEW -->
@@ -179,7 +172,7 @@
           <p id="settings-help">范围：5～1440 分钟（24 小时），默认 120 分钟。此项不是 SSH 终端的空闲时间。</p>
           <p id="settings-runtime" role="status"></p>
           <button id="settings-save" type="submit" class="btn btn-primary">保存设置</button>
-          <p>打开顶部临时授权后可保存；修改后重启连接器生效，已建立的 MCP 会话不会被网页直接断开。</p>
+          <p>打开顶部的“允许智能体管理凭据”后才能保存。修改后需重启本容器生效。</p>
           <div id="settings-status" role="status" aria-live="polite"></div>
         </form>
       </section>
