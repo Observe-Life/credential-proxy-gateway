@@ -436,7 +436,11 @@ pub struct ServiceId { pub id: String }
 
 #[tool_router]
 impl McpServer {
-    #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证代理保险箱网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
+    // 适配器只有三类（远程 MCP / HTTP 接口 / 本地命令行），是同一个「步骤清单」模型的三种
+    // 执行器；共性写在代码里，个性写在服务记录里。工具说明是提醒性质的用法说明，只写与调用
+    // 直接相关的必要信息；凭据附加方式与等待条件必须由程序执行，不能交给模型。
+    // 详见 README「服务适配机制设计」。
+    #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证统一代理网关网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
     async fn credential_registry(&self) -> Result<Json<CredentialResponse>, ErrorData> {
         let records = self.state.vault.service_metadata().map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result:serde_json::json!({"services":records,"management_open":self.state.vault.is_management_unlocked(),"remaining_seconds":self.state.vault.management_remaining_seconds()}) }))
@@ -446,7 +450,7 @@ impl McpServer {
         self.state.vault.put_service_record(record).map_err(err_to_mcp)?;
         Ok(Json(OkResult { ok:true }))
     }
-    #[tool(description = "调用凭证代理保险箱中已注册的MCP工具。service_id/tool/arguments按credential_registry返回的工具和注意事项填写。程序附加凭据，模型不接收密钥。支持Exa、豆包、微信公众号、GitHub；GitHub用gh_status/gh_run/gh_git。")]
+    #[tool(description = "调用凭证统一代理网关中已注册的MCP工具。service_id/tool/arguments按credential_registry返回的工具和注意事项填写。程序附加凭据，模型不接收密钥。支持Exa、豆包、微信公众号、GitHub；GitHub用gh_status/gh_run/gh_git。")]
     async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<CredentialResponse>, ErrorData> {
         let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool, req.arguments).await.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result:output }))

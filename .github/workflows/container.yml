@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/observe-life/credential-proxy-vault
+  IMAGE_NAME: ghcr.io/observe-life/credential-proxy-gateway
 
 jobs:
   container:
@@ -66,11 +66,11 @@ jobs:
               print("Notification secret is not configured")
               raise SystemExit(1)
           status = os.environ["BUILD_STATUS"]
-          title = "凭证代理保险箱构建：" + {"success":"成功", "failure":"失败", "cancelled":"取消"}.get(status, status)
+          title = "凭证统一代理网关构建：" + {"success":"成功", "failure":"失败", "cancelled":"取消"}.get(status, status)
           body = urllib.parse.urlencode({"title":title, "desp":"构建结果："+status+"\n提交："+os.environ["BUILD_COMMIT"]+"\n详情："+os.environ["RUN_URL"]}).encode()
           for attempt in range(3):
               try:
-                  request = urllib.request.Request(endpoint, data=body, headers={"User-Agent":"credential-proxy-vault-notifier/1.0","Content-Type":"application/x-www-form-urlencoded"})
+                  request = urllib.request.Request(endpoint, data=body, headers={"User-Agent":"credential-proxy-gateway-notifier/1.0","Content-Type":"application/x-www-form-urlencoded"})
                   with urllib.request.urlopen(request, timeout=20) as response:
                       result = json.loads(response.read())
                       if result.get("code") != 0 or result.get("errno",0) != 0:

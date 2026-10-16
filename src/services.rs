@@ -1,4 +1,15 @@
 //! MCP registry and credential-use adapters. Secret-bearing records remain inside Vault.
+//!
+//! Design (see README "服务适配机制设计" / "Service Adapter Design"):
+//! - Only three adapter classes exist: remote MCP, HTTP API, local CLI program. They are one
+//!   "step list" model mapped onto three executors, not three independent logics.
+//! - Commonality (step execution, MCP handshake, retry, timeout, credential injection, result
+//!   redaction) lives in code; specificity (URL, parameter semantics, notes) lives in the
+//!   service record, so adding a service needs no code change.
+//! - Specificity is split by cost of error: parameter semantics go to advisory text shown to the
+//!   agent on every call, while credential placement and wait conditions stay structured fields
+//!   executed by the program. Handing the credential to the model would break the confidentiality
+//!   promise; handing polling to the model would turn one call into dozens of round-trips.
 use crate::{state::AppState, error::{ConnectorError, ErrorCode, Result}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -70,7 +81,7 @@ async fn upstream_rpc(client:&reqwest::Client,url:&str,key:&str,sid:Option<&str>
 async fn native_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
     let client=http_client()?;let mut url=reqwest::Url::parse(&s.url).map_err(|_|internal("invalid upstream URL"))?;
     let header=if s.adapter=="exa" {if !s.credential.is_empty(){url.query_pairs_mut().append_pair("exaApiKey",&s.credential);} ""}else{&s.credential};
-    let (init,sid)=upstream_rpc(&client,url.as_str(),header,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"credential-proxy-vault","version":"0.1.0"}}})).await?;
+    let (init,sid)=upstream_rpc(&client,url.as_str(),header,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"credential-proxy-gateway","version":"0.1.0"}}})).await?;
     if init.get("error").is_some(){return Err(internal("upstream MCP initialization rejected"))}
     let _=upstream_rpc(&client,url.as_str(),header,sid.as_deref(),json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
     let result=upstream_rpc(&client,url.as_str(),header,sid.as_deref(),json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":args}})).await;

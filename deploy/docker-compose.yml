@@ -1,15 +1,15 @@
 services:
-  ssh-connector-mcp:
+  credential-proxy-gateway:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: ghcr.io/observe-life/ssh-connector-mcp:latest
-    container_name: ssh-connector-mcp
+    image: ghcr.io/observe-life/credential-proxy-gateway:latest
+    container_name: credential-proxy-gateway
     restart: unless-stopped
     environment:
       SSH_CONNECTOR_BIND_ADDRESS: 0.0.0.0
       # 允许其他容器用容器名访问 /mcp（追加到 rmcp 的默认回环白名单之后）
-      SSH_CONNECTOR_ALLOWED_HOSTS: ssh-connector-mcp
+      SSH_CONNECTOR_ALLOWED_HOSTS: credential-proxy-gateway
       RUST_LOG: info
       # 可选：容器启动时自动解锁已初始化的保险箱。
       # SSH_CONNECTOR_MASTER_PASSWORD_ENV: SSH_CONNECTOR_MASTER_PASSWORD
