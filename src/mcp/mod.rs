@@ -434,12 +434,30 @@ pub struct ServiceCall {
 #[derive(Deserialize, JsonSchema)]
 pub struct ServiceId { pub id: String }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct GatewayRequest {
+    pub card_id: String,
+    pub method: String,
+    pub url: String,
+    #[serde(default)] pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)] pub body: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GatewayRun {
+    pub card_id: String,
+    pub command: String,
+    #[serde(default)] pub cwd: Option<String>,
+    #[serde(default)] pub timeout: Option<u64>,
+}
+
 #[tool_router]
 impl McpServer {
-    // 适配器只有三类（远程 MCP / HTTP 接口 / 本地命令行），是同一个「步骤清单」模型的三种
-    // 执行器；共性写在代码里，个性写在服务记录里。工具说明是提醒性质的用法说明，只写与调用
-    // 直接相关的必要信息；凭据附加方式与等待条件必须由程序执行，不能交给模型。
-    // 详见 README「服务适配机制设计」。
+    // 服务适配机制（详见 README「服务适配机制设计」）：
+    // 每个服务一张卡片 = 名称 + 允许的地址 + 凭据 + 注入方式（这四项是机制），
+    // 外加建议性的常用端点与调用注意事项。网关只做三件事：按地址查凭据、注入、
+    // 把响应里的凭据抹掉；方法/路径/参数/请求体都由模型自己决定，所以新增服务
+    // 只需加一张卡片，不改代码。凭据永不进入模型上下文。
     #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证统一代理网关网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
     async fn credential_registry(&self) -> Result<Json<CredentialResponse>, ErrorData> {
         let records = self.state.vault.service_metadata().map_err(err_to_mcp)?;
@@ -459,6 +477,39 @@ impl McpServer {
     async fn credential_remove(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
         self.state.vault.remove_service_record(&req.id).map_err(err_to_mcp)?;
         Ok(Json(OkResult { ok:true }))
+    }
+
+    #[tool(description = "列出所有服务卡片：名称、允许的地址、注入方式、建议的常用端点、调用注意事项，以及凭据配了哪几个字段（绝不返回值）。若用户要新增或修改卡片或凭据，请提醒用户在网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
+    async fn gateway_list_cards(&self) -> Result<Json<CredentialResponse>, ErrorData> {
+        let cards = self.state.vault.service_cards().map_err(err_to_mcp)?;
+        Ok(Json(CredentialResponse { result: serde_json::json!({"cards": cards, "management_open": self.state.vault.is_management_unlocked(), "remaining_seconds": self.state.vault.management_remaining_seconds()}) }))
+    }
+
+    #[tool(description = "新增或修改一张服务卡片。字段：id；name；addresses（允许的地址，一组主机名，支持 *.example.com 且只匹配一层子域）；credentials（键值对，可多个字段如 AppKey + Secret；留空表示保留原值）；auth（bearer / header / basic / query:<参数名> / none）；header_name；endpoints（建议性的常用端点，只写用得上那几个）；notes（建议性注意事项，只写与调用直接相关的必要信息）；timeout。必须先由用户在网页打开临时管理开关；凭据永不回显。")]
+    async fn gateway_register_card(&self, Parameters(card): Parameters<crate::gateway::ServiceCard>) -> Result<Json<OkResult>, ErrorData> {
+        self.state.vault.put_service_card(card).map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok:true }))
+    }
+
+    #[tool(description = "删除一张服务卡片。用户须在网页打开30分钟临时管理开关。")]
+    async fn gateway_remove_card(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
+        self.state.vault.remove_service_card(&req.id).map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok:true }))
+    }
+
+    #[tool(description = "按服务卡片发一次 HTTP 请求。方法、完整网址、请求头和请求体都由你决定；程序按卡片校验目标主机、按卡片的注入方式附加凭据，再把响应里出现的凭据抹掉，所以你看不到凭据的值。目标主机必须在该卡片的 addresses 里，否则直接拒绝。不要自带 Host、Forwarded、X-Forwarded-* 这类会改道请求的头，也不要试图把凭据值写进请求，两者都会被拒。跳转允许，但跳到卡片地址之外的地址时不会带凭据。")]
+    async fn gateway_request(&self, Parameters(req): Parameters<GatewayRequest>) -> Result<Json<CredentialResponse>, ErrorData> {
+        let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
+        let out = crate::gateway::execute_http(&card, &req.method, &req.url, req.headers, req.body).await.map_err(err_to_mcp)?;
+        Ok(Json(CredentialResponse { result: out }))
+    }
+
+    #[tool(description = "按服务卡片跑一次本地命令。卡片里的凭据会作为环境变量注入子进程，命令输出里出现的凭据同样会被抹掉，所以你看不到凭据的值，也不要把它写进命令。command 是整条命令行（支持单双引号），cwd 默认 /app/data/github（git 操作务必指向仓库目录），timeout 默认 120 秒、上限 10800 秒。")]
+    async fn gateway_run(&self, Parameters(req): Parameters<GatewayRun>) -> Result<Json<CredentialResponse>, ErrorData> {
+        let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
+        let cwd = req.cwd.unwrap_or_else(|| "/app/data/github".to_string());
+        let out = crate::gateway::execute_command(&card, &req.command, &cwd, req.timeout.unwrap_or(120)).await.map_err(err_to_mcp)?;
+        Ok(Json(CredentialResponse { result: out }))
     }
 
     #[tool(

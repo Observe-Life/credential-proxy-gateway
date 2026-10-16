@@ -323,6 +323,51 @@ impl Vault {
         Ok(())
     }
 
+    fn card_table(&self) -> Result<()> {
+        self.lock_conn().execute("CREATE TABLE IF NOT EXISTS gateway_cards (id TEXT PRIMARY KEY, sealed BLOB NOT NULL)", [])?;
+        Ok(())
+    }
+
+    /// 写入或更新一张服务卡片。凭据留空表示保留原值。
+    pub fn put_service_card(&self, mut card: crate::gateway::ServiceCard) -> Result<()> {
+        self.require_management()?;
+        card.validate()?;
+        if card.credentials.is_empty() {
+            if let Ok(existing) = self.get_service_card(&card.id) { card.credentials = existing.credentials; }
+        }
+        self.card_table()?;
+        let bytes = serde_json::to_vec(&card).map_err(|_| ConnectorError::internal("card serialization failed"))?;
+        let sealed = self.with_dek(|dek| seal(dek, &bytes))?;
+        self.lock_conn().execute("INSERT INTO gateway_cards (id,sealed) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed", rusqlite::params![card.id, sealed])?;
+        Ok(())
+    }
+
+    pub fn get_service_card(&self, id: &str) -> Result<crate::gateway::ServiceCard> {
+        self.card_table()?;
+        let sealed: Vec<u8> = self.lock_conn().query_row("SELECT sealed FROM gateway_cards WHERE id=?1", [id], |r| r.get(0))?;
+        let bytes = self.with_dek(|dek| open(dek, &sealed))?;
+        serde_json::from_slice(&bytes).map_err(|_| ConnectorError::internal("card unreadable"))
+    }
+
+    /// 卡片元数据列表。只说明凭据配了哪几个字段，绝不返回值。
+    pub fn service_cards(&self) -> Result<Vec<serde_json::Value>> {
+        self.card_table()?;
+        let ids: Vec<String> = {
+            let conn = self.lock_conn();
+            let mut stmt = conn.prepare("SELECT id FROM gateway_cards ORDER BY id")?;
+            let values = stmt.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            values
+        };
+        ids.iter().map(|id| self.get_service_card(id).map(|c| c.metadata())).collect()
+    }
+
+    pub fn remove_service_card(&self, id: &str) -> Result<()> {
+        self.require_management()?;
+        self.card_table()?;
+        self.lock_conn().execute("DELETE FROM gateway_cards WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     /// Run a closure with the live DEK, or fail if locked.
     fn with_dek<T>(&self, f: impl FnOnce(&[u8; 32]) -> Result<T>) -> Result<T> {
         let guard = self.unlocked.lock().unwrap_or_else(|p| p.into_inner());
