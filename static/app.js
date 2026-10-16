@@ -271,28 +271,32 @@ function renderHosts() {
   }
   el.hostsEmpty().classList.add('hidden');
   el.hostsTableWrap().classList.remove('hidden');
-  const tbody = el.hostsBody();
-  tbody.innerHTML = '';
+  const list = el.hostsBody();
+  list.innerHTML = '';
   hosts.forEach((h) => {
-    const tr = document.createElement('tr');
-    tr.dataset.hostId = h.host_id;
-    tr.innerHTML = `
-      <td>${escHtml(h.alias)}</td>
-      <td class="mono">${escHtml(h.host)}</td>
-      <td>${h.port}</td>
-      <td class="mono">${escHtml(h.user)}</td>
-      <td><span class="badge-auth">${escHtml(authLabel(h.auth_kind))}</span></td>
-      <td>${h.jump_count || 0}</td>
-      <td>${statusBadge(h.status)}</td>
-      <td class="col-actions">
-        <div class="action-group">
-          ${hostConnectionButton(h)}
-          <button class="btn btn-sm btn-host-edit" data-id="${h.host_id}">编辑</button>
-          <button class="btn btn-sm btn-host-reveal" data-id="${h.host_id}">查看凭据</button>
-          <button class="btn btn-sm btn-danger btn-host-delete" data-id="${h.host_id}">删除</button>
-        </div>
-      </td>`;
-    tbody.appendChild(tr);
+    // 卡片而不是表格行：字段与操作按钮保持原样，只换承载方式
+    const card = document.createElement('article');
+    card.className = 'host-card';
+    card.dataset.hostId = h.host_id;
+    card.innerHTML = `
+      <div class="host-card-head">
+        <h3>${escHtml(h.alias)}</h3>
+        ${statusBadge(h.status)}
+      </div>
+      <dl class="host-card-fields">
+        <dt>主机</dt><dd class="mono">${escHtml(h.host)}</dd>
+        <dt>端口</dt><dd>${h.port}</dd>
+        <dt>用户</dt><dd class="mono">${escHtml(h.user)}</dd>
+        <dt>认证</dt><dd><span class="badge-auth">${escHtml(authLabel(h.auth_kind))}</span></dd>
+        <dt>跳板</dt><dd>${h.jump_count || 0}</dd>
+      </dl>
+      <div class="host-card-actions">
+        ${hostConnectionButton(h)}
+        <button class="btn btn-sm btn-host-edit" data-id="${h.host_id}">编辑</button>
+        <button class="btn btn-sm btn-host-reveal" data-id="${h.host_id}">查看凭据</button>
+        <button class="btn btn-sm btn-danger btn-host-delete" data-id="${h.host_id}">删除</button>
+      </div>`;
+    list.appendChild(card);
   });
 }
 

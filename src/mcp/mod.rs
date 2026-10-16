@@ -428,7 +428,11 @@ pub struct CredentialResponse { pub result: Value }
 #[derive(Deserialize, JsonSchema)]
 pub struct ServiceCall {
     pub service_id: String,
-    pub tool: String,
+    /// 旧字段名 `tool` 与 AstrBot 的工具执行器关键字参数同名，会让调用必然失败
+    /// （got multiple values for keyword argument 'tool'），故改名为 tool_name，
+    /// 并保留旧名兼容，等所有调用方迁完再删别名。
+    #[serde(alias = "tool")]
+    pub tool_name: String,
     #[serde(default)] pub arguments: Value,
 }
 #[derive(Deserialize, JsonSchema)]
@@ -468,9 +472,9 @@ impl McpServer {
         self.state.vault.put_service_record(record).map_err(err_to_mcp)?;
         Ok(Json(OkResult { ok:true }))
     }
-    #[tool(description = "调用凭证统一代理网关中已注册的MCP工具。service_id/tool/arguments按credential_registry返回的工具和注意事项填写。程序附加凭据，模型不接收密钥。支持Exa、豆包、微信公众号、GitHub；GitHub用gh_status/gh_run/gh_git。")]
+    #[tool(description = "调用凭证统一代理网关中已注册的MCP工具。必填 service_id 与 tool_name（旧字段名 tool 仍兼容），arguments 填该工具的参数。service_id 取值与对应工具：exa＝web_search_exa；doubao＝doubao_web_search；wechat＝wechat_search_v2_fetch_search；github＝gh_status、gh_run、gh_git。GitHub：gh_run 执行 gh 子命令，gh_git 执行 git 子命令；两者都支持 cwd（默认 /app/data/github，git 操作务必指向仓库目录）与 timeout（秒，默认 120，最大 10800）。git 已默认注入 safe.directory 与 user.name/user.email，无需手工配置。各服务必备参数与注意事项以 credential_registry 返回的 tools/notes 为准。程序附加凭据，模型不接收密钥。")]
     async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<CredentialResponse>, ErrorData> {
-        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool, req.arguments).await.map_err(err_to_mcp)?;
+        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool_name, req.arguments).await.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result:output }))
     }
     #[tool(description = "删除MCP注册。用户须在网页打开30分钟临时管理开关。")]
