@@ -119,7 +119,7 @@ async fn github_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
     let output=tokio::time::timeout(std::time::Duration::from_secs(timeout),cmd.output()).await.map_err(|_|internal("GitHub command timed out"))?.map_err(|_|internal("GitHub executable failed"))?;
     Ok(json!({"exit_code":output.status.code(),"stdout":redact(&String::from_utf8_lossy(&output.stdout),&s.credential),"stderr":redact(&String::from_utf8_lossy(&output.stderr),&s.credential)}))
 }
-fn parse_command(s:&str)->Result<Vec<String>> {
+pub(crate) fn parse_command(s:&str)->Result<Vec<String>> {
     let mut words=Vec::new();let mut word=String::new();let mut quote=None;let mut escape=false;let mut started=false;
     for c in s.chars(){if escape {word.push(c);escape=false;started=true;continue}if c=='\\'&&quote!=Some('\''){escape=true;started=true;continue}if let Some(q)=quote{if c==q{quote=None}else{word.push(c)}started=true;}else if c=='\''||c=='"'{quote=Some(c);started=true;}else if c.is_whitespace(){if started{words.push(std::mem::take(&mut word));started=false}}else{word.push(c);started=true}}
     if escape||quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"unclosed command quoting"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"empty command"))}Ok(words)

@@ -12,6 +12,7 @@ mod term;
 mod vault;
 mod web;
 mod services;
+mod gateway;
 
 use clap::Parser;
 
