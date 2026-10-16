@@ -1090,7 +1090,7 @@ setInterval(refreshGrant,10000);
 let editorSnapshot='',editorTrigger=null;
 function editorState(){return JSON.stringify(Object.fromEntries(new FormData($('registry-form'))));}
 function splitLines(v){return (v||'').split('\n').map(s=>s.trim()).filter(Boolean);}
-function syncAuthFields(){const f=$('registry-form'),a=f.elements.auth.value;
+function syncCardAuthFields(){const f=$('registry-form'),a=f.elements.auth.value;
   $('rf-header-group').style.display=a==='header'?'':'none';
   $('rf-query-group').style.display=a==='query'?'':'none';
   $('auth-hint').textContent=a==='none'?'不注入任何凭据。':(a==='query'?'凭据作为网址参数附加。':'凭据注入到外发请求里，智能体看不到值。');}
@@ -1106,7 +1106,7 @@ function openEditor(item,trigger){
   f.elements.endpoints.value=(item?.endpoints||[]).map(e=>[e.method,e.path,e.summary].filter(Boolean).join(' ')).join('\n');
   f.elements.notes.value=item?.notes||'';
   f.elements.credentials.value='';
-  syncAuthFields();
+  syncCardAuthFields();
   $('registry-editor-title').textContent=item?'编辑服务卡片':'新增服务卡片';
   if(item?.credential_fields?.length){
     f.elements.credentials.placeholder='读取中…';
@@ -1138,7 +1138,7 @@ async function loadRegistry(){
   }catch(e){showStatus($('registry-message'),describeError(e),'error')}
   await refreshGrant();
 }
-$('registry-form').elements.auth.addEventListener('change',syncAuthFields);
+$('registry-form').elements.auth.addEventListener('change',syncCardAuthFields);
 $('registry-close').addEventListener('click',()=>closeEditor(false));
 $('registry-cancel').addEventListener('click',()=>closeEditor(false));
 $('registry-editor').addEventListener('cancel',e=>{e.preventDefault();closeEditor(false);});
