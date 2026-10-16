@@ -153,15 +153,16 @@ async fn management_grant(State(st): State<Shared>, Json(req): Json<GrantRequest
     if req.enabled {st.vault.open_management_grant().map_err(ApiError::from)?;} else {st.vault.lock_management();}
     Ok(Json(json!({"enabled":st.vault.is_management_unlocked(),"remaining_seconds":st.vault.management_remaining_seconds()})))
 }
+// 服务卡片：列表只返回元数据，凭据只说明配了哪几个字段，绝不返回值。
 async fn registry_list(State(st): State<Shared>) -> ApiResult {
-    Ok(Json(json!({"services":st.vault.service_metadata().map_err(ApiError::from)?})))
+    Ok(Json(json!({"services":st.vault.service_cards().map_err(ApiError::from)?})))
 }
-async fn registry_save(State(st): State<Shared>, Json(record): Json<crate::services::ServiceRecord>) -> ApiResult {
-    st.vault.put_service_record(record).map_err(ApiError::from)?;
+async fn registry_save(State(st): State<Shared>, Json(card): Json<crate::gateway::ServiceCard>) -> ApiResult {
+    st.vault.put_service_card(card).map_err(ApiError::from)?;
     Ok(Json(json!({"ok":true})))
 }
 async fn registry_delete(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
-    st.vault.remove_service_record(&id).map_err(ApiError::from)?;
+    st.vault.remove_service_card(&id).map_err(ApiError::from)?;
     Ok(Json(json!({"ok":true})))
 }
 
@@ -260,10 +261,16 @@ async fn reveal_host(State(st): State<Shared>, Path(id): Path<String>) -> ApiRes
 }
 
 async fn reveal_service_credential(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
-    let credential = st.vault.service_credential(&id).map_err(ApiError::from)?;
+    let card = st.vault.get_service_card(&id).map_err(ApiError::from)?;
+    let credential = card
+        .credentials
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     st.audit.record(
-        crate::audit::AuditLog::entry("mcp_credential_reveal")
-            .with_detail(json!({ "source": "web", "service": id })),
+        crate::audit::AuditLog::entry("card_credential_reveal")
+            .with_detail(json!({ "source": "web", "card": id })),
     );
     Ok(Json(json!({ "credential": credential })))
 }

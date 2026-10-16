@@ -1087,25 +1087,33 @@ async function refreshGrant(){
 $('management-grant-switch').addEventListener('change',async e=>{try{await apiFetch('PUT','/management/grant',{enabled:e.target.checked});await refreshGrant();}catch(err){e.target.checked=false;showToast(describeError(err),'error')}});
 setInterval(refreshGrant,10000);
 
-const methodCatalog={remote_mcp:[['exa','Exa 搜索'],['wechat','微信公众号文章']],http_api:[['doubao','豆包搜索（国内版）']],local_program:[['github','GitHub 命令行（gh / git）']]};
 let editorSnapshot='',editorTrigger=null;
 function editorState(){return JSON.stringify(Object.fromEntries(new FormData($('registry-form'))));}
-function updateMethods(selected){const f=$('registry-form'),kind=f.elements.interface_type.value;f.elements.invocation_method.replaceChildren(...methodCatalog[kind].map(([v,t])=>new Option(t,v)));if(selected&&methodCatalog[kind].some(([v])=>v===selected))f.elements.invocation_method.value=selected;$('invocation-hint').textContent=kind==='local_program'?'当前支持命令行适配；标准输入输出 MCP 尚未开放。':'仅显示已实现并支持的调用方法。';}
+function splitLines(v){return (v||'').split('\n').map(s=>s.trim()).filter(Boolean);}
+function syncAuthFields(){const f=$('registry-form'),a=f.elements.auth.value;
+  $('rf-header-group').style.display=a==='header'?'':'none';
+  $('rf-query-group').style.display=a==='query'?'':'none';
+  $('auth-hint').textContent=a==='none'?'不注入任何凭据。':(a==='query'?'凭据作为网址参数附加。':'凭据注入到外发请求里，智能体看不到值。');}
 function openEditor(item,trigger){
   const f=$('registry-form');f.reset();editorTrigger=trigger;
-  for(const k of ['id','name','url','notes'])f.elements[k].value=item?.[k]||'';
-  f.elements.id.readOnly=!!item;
-  f.elements.interface_type.value=item?.interface_type||'remote_mcp';
-  updateMethods(item?.invocation_method||item?.adapter);
-  f.elements.tools.value=JSON.stringify(item?.tools||[],null,2);
-  f.elements.credential.value='';
-  $('registry-editor-title').textContent=item?'编辑 MCP':'新增 MCP';
-  if(item?.has_credential){
-    f.elements.credential.placeholder='读取中…';
+  f.elements.id.value=item?.id||'';f.elements.id.readOnly=!!item;
+  f.elements.name.value=item?.name||'';
+  f.elements.addresses.value=(item?.addresses||[]).join('\n');
+  const a=item?.auth||'bearer';
+  f.elements.auth.value=a.startsWith('query:')?'query':a;
+  f.elements.header_name.value=item?.header_name||'';
+  f.elements.query_param.value=a.startsWith('query:')?a.slice(6):'';
+  f.elements.endpoints.value=(item?.endpoints||[]).map(e=>[e.method,e.path,e.summary].filter(Boolean).join(' ')).join('\n');
+  f.elements.notes.value=item?.notes||'';
+  f.elements.credentials.value='';
+  syncAuthFields();
+  $('registry-editor-title').textContent=item?'编辑服务卡片':'新增服务卡片';
+  if(item?.credential_fields?.length){
+    f.elements.credentials.placeholder='读取中…';
     apiFetch('GET',`/registry/${encodeURIComponent(item.id)}/credential`).then(v=>{
-      f.elements.credential.value=v.credential||'';f.elements.credential.placeholder='修改后保存即生效';editorSnapshot=editorState();
-    }).catch(e=>{f.elements.credential.placeholder='读取失败';showToast(describeError(e),'error');});
-  } else { f.elements.credential.placeholder=item?'此服务无凭据':'填写凭据'; }
+      f.elements.credentials.value=v.credential||'';f.elements.credentials.placeholder='修改后保存即生效';editorSnapshot=editorState();
+    }).catch(e=>{f.elements.credentials.placeholder='读取失败';showToast(describeError(e),'error');});
+  } else { f.elements.credentials.placeholder='每行一个 KEY=VALUE，例如\nTOKEN=sk-xxx'; }
   $('registry-editor').showModal();document.body.classList.add('editor-open');editorSnapshot=editorState();
   f.elements.id.focus({preventScroll:true});
 }
@@ -1118,32 +1126,41 @@ async function loadRegistry(){
   try{
     const result=await apiFetch('GET','/registry');
     for(const item of result.services){
-      const node=document.createElement('article'),title=document.createElement('h3'),notes=document.createElement('p'),button=document.createElement('button');
-      title.textContent=item.name;notes.textContent=item.notes||'（未填写调用注意事项）';
+      const node=document.createElement('article'),title=document.createElement('h3'),meta=document.createElement('p'),notes=document.createElement('p'),button=document.createElement('button');
+      title.textContent=item.name;
+      meta.textContent='允许的地址：'+((item.addresses||[]).join('、')||'（未填）')+' ｜ 注入方式：'+(item.auth||'-');
+      notes.textContent=item.notes||'（未填写调用注意事项）';
       button.textContent='编辑';button.type='button';button.className='btn btn-ghost';button.onclick=()=>openEditor(item,button);
-      node.append(title,notes,button);box.append(node);
+      node.append(title,meta,notes,button);box.append(node);
     }
-    if(!result.services.length){const empty=document.createElement('p');empty.textContent='还没有注册 MCP。';box.append(empty);}
+    if(!result.services.length){const empty=document.createElement('p');empty.textContent='还没有服务卡片。';box.append(empty);}
     $('registry-message').classList.add('hidden');
   }catch(e){showStatus($('registry-message'),describeError(e),'error')}
   await refreshGrant();
 }
-$('registry-form').elements.interface_type.addEventListener('change',()=>updateMethods());
+$('registry-form').elements.auth.addEventListener('change',syncAuthFields);
 $('registry-close').addEventListener('click',()=>closeEditor(false));
 $('registry-cancel').addEventListener('click',()=>closeEditor(false));
 $('registry-editor').addEventListener('cancel',e=>{e.preventDefault();closeEditor(false);});
 $('registry-new').addEventListener('click',e=>openEditor(null,e.currentTarget));
 $('credential-copy').addEventListener('click',async()=>{
-  const input=$('rf-credential');if(!input.value){showToast('没有可复制的凭据','info');return;}
+  const input=$('rf-credentials');if(!input.value){showToast('没有可复制的凭据','info');return;}
   try{await navigator.clipboard.writeText(input.value);showToast('凭据已复制到剪贴板','success');}
   catch{input.focus();input.select();showToast('凭据已选中，可手动复制','info');}
 });
 $('registry-form').addEventListener('submit',async e=>{
   e.preventDefault();const f=e.target,b=f.querySelector('.modal-footer .btn-primary');b.disabled=true;
   try{
-    const value=Object.fromEntries(new FormData(f));value.adapter=value.invocation_method;value.tools=JSON.parse(value.tools);
-    await apiFetch('PUT','/registry',value);f.elements.credential.value='';closeEditor(true);
-    showToast('注册已保存，凭据不回传给智能体','success');await loadRegistry();
+    const a=f.elements.auth.value;
+    const card={id:f.elements.id.value.trim(),name:f.elements.name.value.trim(),
+      addresses:splitLines(f.elements.addresses.value),
+      credentials:{},auth:a==='query'?('query:'+f.elements.query_param.value.trim()):a,
+      header_name:f.elements.header_name.value.trim(),
+      endpoints:splitLines(f.elements.endpoints.value).map(l=>{const p=l.split(/\s+/);return{method:p[0]||'',path:p[1]||'',summary:p.slice(2).join(' ')}}),
+      notes:f.elements.notes.value.trim()};
+    for(const l of splitLines(f.elements.credentials.value)){const i=l.indexOf('=');if(i>0)card.credentials[l.slice(0,i).trim()]=l.slice(i+1).trim();}
+    await apiFetch('PUT','/registry',card);f.elements.credentials.value='';closeEditor(true);
+    showToast('服务卡片已保存，凭据不回传给智能体','success');await loadRegistry();
   }catch(err){showStatus($('registry-message'),describeError(err),'error')}
   finally{b.disabled=false}
 });

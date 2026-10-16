@@ -73,21 +73,22 @@
       <dialog id="registry-editor" aria-labelledby="registry-editor-title">
         <div class="modal">
           <div class="modal-header">
-            <h3 id="registry-editor-title">新增 MCP</h3>
+            <h3 id="registry-editor-title">新增服务卡片</h3>
             <button class="modal-close" id="registry-close" type="button" aria-label="关闭对话框">&times;</button>
           </div>
           <form id="registry-form" class="registry-form">
             <div class="modal-body">
-              <div class="field-group"><label for="rf-id">标识 <span class="required" aria-hidden="true">*</span></label><input id="rf-id" name="id" required placeholder="例如 exa" /></div>
-              <div class="field-group"><label for="rf-name">名称 <span class="required" aria-hidden="true">*</span></label><input id="rf-name" name="name" required placeholder="例如 Exa搜索" /></div>
-              <div class="field-group"><label for="rf-interface">接口类型</label><select id="rf-interface" name="interface_type"><option value="remote_mcp">远程 MCP</option><option value="http_api">HTTP API</option><option value="local_program">本地程序</option></select></div>
-              <div class="field-group"><label for="rf-method">调用方法</label><select id="rf-method" name="invocation_method"></select><span class="hint" id="invocation-hint"></span></div>
-              <div class="field-group"><label for="rf-url">接口地址</label><input id="rf-url" name="url" placeholder="https://example.com/mcp" /></div>
-              <div class="field-group"><label for="rf-credential">凭据</label>
-                <div class="credential-row"><input id="rf-credential" name="credential" type="text" autocomplete="off" spellcheck="false" placeholder="留空保留原凭据" /><button type="button" id="credential-copy" class="btn">复制</button></div>
-                <span class="hint">明文只在本网页显示，智能体没有读取凭据的接口。</span></div>
-              <div class="field-group"><label for="rf-tools">可用工具（JSON）</label><textarea id="rf-tools" name="tools" rows="8">[]</textarea></div>
-              <div class="field-group"><label for="rf-notes">调用注意事项</label><textarea id="rf-notes" name="notes" rows="5"></textarea></div>
+              <div class="field-group"><label for="rf-id">标识 <span class="required" aria-hidden="true">*</span></label><input id="rf-id" name="id" required placeholder="例如 mineru" /></div>
+              <div class="field-group"><label for="rf-name">名称 <span class="required" aria-hidden="true">*</span></label><input id="rf-name" name="name" required placeholder="例如 MinerU 文档解析" /></div>
+              <div class="field-group"><label for="rf-addresses">允许的地址 <span class="required" aria-hidden="true">*</span></label><textarea id="rf-addresses" name="addresses" rows="3" placeholder="一行一个主机名，例如&#10;mineru.net&#10;*.aliyuncs.com"></textarea><span class="hint">只往这些地址注入凭据；支持 *.example.com，只匹配一层子域。</span></div>
+              <div class="field-group"><label for="rf-auth">注入方式 <span class="required" aria-hidden="true">*</span></label><select id="rf-auth" name="auth"><option value="bearer">Authorization: Bearer（最常见）</option><option value="header">自定义请求头</option><option value="basic">Authorization: Basic</option><option value="query">网址参数</option><option value="none">不注入</option></select><span class="hint" id="auth-hint"></span></div>
+              <div class="field-group" id="rf-header-group" style="display:none"><label for="rf-header-name">请求头名</label><input id="rf-header-name" name="header_name" placeholder="例如 X-API-Key" /></div>
+              <div class="field-group" id="rf-query-group" style="display:none"><label for="rf-query-param">网址参数名</label><input id="rf-query-param" name="query_param" placeholder="例如 token" /></div>
+              <div class="field-group"><label for="rf-credentials">凭据</label>
+                <div class="credential-row"><textarea id="rf-credentials" name="credentials" rows="3" autocomplete="off" spellcheck="false" placeholder="每行一个 KEY=VALUE，例如&#10;TOKEN=sk-xxx"></textarea><button type="button" id="credential-copy" class="btn">复制</button></div>
+                <span class="hint">明文只在本网页显示；凭据只用于注入外发请求，智能体读不到值。留空表示保留原值。</span></div>
+              <div class="field-group"><label for="rf-endpoints">常用端点（建议）</label><textarea id="rf-endpoints" name="endpoints" rows="4" placeholder="每行一个，格式：方法 路径 说明&#10;POST /api/v4/extract/task 提交解析任务"></textarea><span class="hint">只是提醒智能体常用哪几个，不限制它用别的。</span></div>
+              <div class="field-group"><label for="rf-notes">调用注意事项（建议）</label><textarea id="rf-notes" name="notes" rows="4" placeholder="只写与调用直接相关的必要信息"></textarea></div>
             </div>
             <div class="modal-footer">
               <button type="button" class="btn btn-ghost" id="registry-cancel">取消</button>
