@@ -714,6 +714,10 @@ UTF-8：结果里 `had_invalid_utf8` 为 `true`，内容显示为乱码。
 
 因此，容器重启后不需要再次输入主密码即可执行 SSH 操作；只有再次管理凭据或查看明文凭据时才需要主密码。
 
+管理授权的收回**只有两条路径**：30 分钟自然到期，或显式调用下面的锁定接口。未通过登录校验的网页请求只拒绝当次请求，**不会**改动授权状态——网页会话过期或别的容器做一次只读探测，都不该把人正开着的管理开关关掉。
+
+每一次授权开与关都写审计，便于事后追溯：`management_grant_open`、`management_grant_close`、`management_lock`。服务调用面同样留痕，失败的越界尝试也在内：`gateway_request` / `gateway_request_failed`、`gateway_call_mcp` / `_failed`、`gateway_run` / `_failed`、`credential_invoke` / `_failed`，以及卡片与服务的 `card_register` / `card_remove`、`service_register` / `service_remove`。审计里的地址与命令先抹凭据再限长，不落密钥。
+
 管理锁定接口：
 
 ```bash
