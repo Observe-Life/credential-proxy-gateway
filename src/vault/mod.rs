@@ -762,5 +762,3 @@ mod management_grant_tests {
         assert!(!ManagementGrant::default().is_open(start));
     }
 }
-
-#[cfg(test)]

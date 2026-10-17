@@ -122,7 +122,7 @@ async fn save_settings(State(st): State<Shared>, Json(req): Json<SettingsRequest
     get_settings(State(st)).await
 }
 
-async fn verify_gateway_identity(State(st): State<Shared>, req: Request, next: Next) -> Response {
+async fn verify_gateway_identity(State(_st): State<Shared>, req: Request, next: Next) -> Response {
     let file = match std::env::var("CREDENTIAL_VAULT_GATEWAY_AUTH_FILE") {
         Ok(path) => path,
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "统一登录认证尚未配置").into_response(),
