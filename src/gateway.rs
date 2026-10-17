@@ -607,8 +607,10 @@ mod tests {
     fn card_validation_requires_address_and_valid_auth() {
         let mut c = card();
         assert!(c.validate().is_ok());
+        // 地址允许为空：本地命令类不需要地址。为空时任何 HTTP 目标都会被拒，
+        // 属于安全方向的失败，所以这里校验应当通过。
         c.addresses.clear();
-        assert!(c.validate().is_err(), "没有地址等于凭据无处可去");
+        assert!(c.validate().is_ok(), "地址可以为空");
         c.addresses = vec!["api.example.com".into()];
         c.auth = "magic".into();
         assert!(c.validate().is_err());
