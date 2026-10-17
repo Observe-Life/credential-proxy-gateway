@@ -558,6 +558,21 @@ pub async fn execute_mcp(
     serde_json::from_str(&scrubbed).map_err(|_| internal("结果整理失败"))
 }
 
+/// 这条命令是否会调用 git。
+///
+/// 不只看首词：命令常被 `sh -c "..."` 包裹，或出现在 `&&` / `;` 之后，
+/// 只看首词会漏注入。这里按词边界扫全串，命中独立的 `git` 或 `/x/git`。
+/// 注入的只是环境变量，对非 git 进程没有副作用，所以宁可宽一点。
+fn command_invokes_git(command: &str) -> bool {
+    command
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '\'' | '"' | '=' | ',')
+        })
+        .map(|t| t.trim_matches(|c: char| c == '\'' || c == '"'))
+        .any(|t| t.rsplit('/').next() == Some("git"))
+}
+
 /// 执行一次本地命令：凭据作为环境变量注入子进程，输出里的凭据抹掉。
 pub async fn execute_command(
     card: &ServiceCard,
@@ -583,6 +598,24 @@ pub async fn execute_command(
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_PAGER", "cat")
         .env("GIT_PAGER", "cat");
+    // git 的默认配置属于机制，由程序兜住，不让调用方每次手写：
+    // 目录信任与提交身份总是给；只有这张卡片带 GH_TOKEN 时才挂凭据助手，
+    // 否则会去调用一个没有令牌的 gh，反而让调用方困惑。
+    if command_invokes_git(command) {
+        let mut keys: Vec<(&str, &str)> = vec![
+            ("safe.directory", "*"),
+            ("user.name", "vault-connector"),
+            ("user.email", "vault@localhost"),
+        ];
+        if card.credentials.contains_key("GH_TOKEN") {
+            keys.push(("credential.helper", "!gh auth git-credential"));
+        }
+        cmd.env("GIT_CONFIG_COUNT", keys.len().to_string());
+        for (i, (key, value)) in keys.iter().enumerate() {
+            cmd.env(format!("GIT_CONFIG_KEY_{i}"), *key);
+            cmd.env(format!("GIT_CONFIG_VALUE_{i}"), *value);
+        }
+    }
     cmd.kill_on_drop(true);
     let secs = timeout.clamp(1, 10800);
     let out = tokio::time::timeout(std::time::Duration::from_secs(secs), cmd.output())
@@ -612,6 +645,34 @@ mod tests {
             endpoints: vec![],
             notes: String::new(),
             timeout: None,
+        }
+    }
+
+    #[test]
+    fn detects_git_invocation_beyond_first_word() {
+        for yes in [
+            "git status",
+            "git -C /app/data/github/log status",
+            "/usr/bin/git push",
+            "sh -c \"git commit -m x\"",
+            "cd /tmp && git log",
+            "set -e; git fetch",
+            "env A=1 git status",
+            "echo ok; git status",
+        ] {
+            assert!(command_invokes_git(yes), "应识别为 git 调用: {yes}");
+        }
+        for no in [
+            "ls -la",
+            "echo github",
+            "curl https://github.com",
+            "gh api repos",
+            "docker ps",
+            "git-credential-cache",
+            "digital",
+            "ls /usr/bin",
+        ] {
+            assert!(!command_invokes_git(no), "不应误判为 git: {no}");
         }
     }
 
