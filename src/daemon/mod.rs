@@ -34,16 +34,6 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     // and the Web UI drives first-run init.
     maybe_unlock(&vault, &opts)?;
 
-    // 一次性迁移：把旧的注册记录搬成服务卡片。
-    // 幂等——卡片表非空时不动，所以重启不会重复搬、也不会覆盖新卡片。
-    if vault.is_unlocked() {
-        match vault.migrate_legacy_services() {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(count = n, "legacy service records migrated into cards"),
-            Err(e) => tracing::warn!("legacy migration skipped: {e}"),
-        }
-    }
-
     // One-time migration file is read only inside the service. Never log its contents.
     // Credential records are encrypted immediately with the existing vault DEK.
     if let Ok(file) = std::env::var("CREDENTIAL_VAULT_IMPORT_FILE") {
