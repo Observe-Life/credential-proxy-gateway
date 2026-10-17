@@ -230,24 +230,28 @@ pub(crate) fn parse_command(s:&str)->Result<Vec<String>> {
     assert!(parse_command("'unclosed").is_err());
 }
 #[test]fn tools_forms_decode_leniently(){
-    // 对象列表、纯名字列表、被压成字符串的列表，都要能还原
-    for raw in [
-        r#"[{"name":"gh_run","arguments":{"command":"gh子命令"}}]"#,
-        r#"["gh_status"]"#,
+    // 走真正的反序列化路径（lenient_tools），三种历史形状都必须还原成提醒内容：
+    // 对象列表、纯工具名列表、整体被压成 JSON 字符串的列表。
+    for (input, want) in [
+        (r#"{"id":"a","name":"a","adapter":"github","tools":[{"name":"gh_run","arguments":{"command":"gh子命令"}}]}"#, "gh_run"),
+        (r#"{"id":"a","name":"a","adapter":"github","tools":["gh_status"]}"#, "gh_status"),
+        (r#"{"id":"a","name":"a","adapter":"github","tools":"[\"name\" inside string]"}"#, ""),
     ] {
-        let v: Value = serde_json::from_str(raw).unwrap();
-        for shape in [v.clone(), Value::String(raw.to_string())] {
-            let s = ServiceRecord{
-                id:"t".into(),name:"t".into(),adapter:"github".into(),
-                interface_type:String::new(),invocation_method:String::new(),
-                url:String::new(),credential:String::new(),
-                tools:tools_from_value(&shape).unwrap_or_default(),
-                notes:String::new(),
-            };
-            assert!(!s.tools.is_empty(), "tools 不该被静默丢弃: {shape}");
-            assert_eq!(s.tools[0].name, if raw.contains("gh_run") {"gh_run"} else {"gh_status"});
+        let record: ServiceRecord = serde_json::from_str(input).unwrap();
+        if want.is_empty() {
+            // 坏数据退化成空而不是炸掉整个注册表，这是可用性取舍
+            assert!(record.tools.is_empty());
+            continue;
         }
+        assert!(!record.tools.is_empty(), "tools 被静默丢弃: {input}");
+        assert_eq!(record.tools[0].name, want);
     }
+    // 被压成字符串的对象列表同样要能还原
+    let escaped = serde_json::to_string(&serde_json::json!([{"name":"gh_run","arguments":{"command":"x"}}])).unwrap();
+    let input = format!(r#"{{"id":"a","name":"a","adapter":"github","tools":{}}}"#, serde_json::Value::String(escaped));
+    let record: ServiceRecord = serde_json::from_str(&input).unwrap();
+    assert_eq!(record.tools.len(), 1, "字符串形态还原失败: {input}");
+    assert_eq!(record.tools[0].name, "gh_run");
 }
 #[test]fn service_arguments_and_redaction(){assert_eq!(parse_command("issue create --title '中文 标题'").unwrap(),vec!["issue","create","--title","中文 标题"]);assert!(parse_command("'unclosed").is_err());assert_eq!(redact("Bearer secret","secret"),"Bearer [凭据已隐藏]");let mut v=json!({"title":"<em class=\"highlight\">中文</em>","date":0});clean_wechat(&mut v);assert_eq!(v["title"],"中文");assert!(v.get("date_local").is_some());}}
 
