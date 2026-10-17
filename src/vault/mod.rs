@@ -274,63 +274,23 @@ impl Vault {
         Ok(())
     }
 
-    fn service_table(&self) -> Result<()> {
-        self.lock_conn().execute("CREATE TABLE IF NOT EXISTS mcp_services (id TEXT PRIMARY KEY, sealed BLOB NOT NULL)", [])?;
-        Ok(())
-    }
-
-    pub fn put_service_record(&self, mut record: crate::services::ServiceRecord) -> Result<()> {
-        self.require_management()?;
-        record.validate()?;
-        if record.credential.is_empty() {
-            if let Ok(existing) = self.get_service_record(&record.id) { record.credential = existing.credential; }
-        }
-        self.service_table()?;
-        let bytes = serde_json::to_vec(&record).map_err(|_| ConnectorError::internal("registration serialization failed"))?;
-        let sealed = self.with_dek(|dek| seal(dek, &bytes))?;
-        self.lock_conn().execute("INSERT INTO mcp_services (id,sealed) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed", rusqlite::params![record.id, sealed])?;
-        Ok(())
-    }
-
-    pub fn get_service_record(&self, id: &str) -> Result<crate::services::ServiceRecord> {
-        self.service_table()?;
-        let sealed: Vec<u8> = self.lock_conn().query_row("SELECT sealed FROM mcp_services WHERE id=?1", [id], |r| r.get(0))?;
-        let bytes = self.with_dek(|dek| open(dek, &sealed))?;
-        serde_json::from_slice(&bytes).map_err(|_| ConnectorError::internal("registration unreadable"))
-    }
-
-    pub fn service_metadata(&self) -> Result<Vec<serde_json::Value>> {
-        self.service_table()?;
-        let ids: Vec<String> = {
-            let conn = self.lock_conn();
-            let mut stmt = conn.prepare("SELECT id FROM mcp_services ORDER BY id")?;
-            let values = stmt.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-            values
-        };
-        ids.iter().map(|id| self.get_service_record(id).map(|r| r.metadata())).collect()
-    }
-
-    /// Plaintext credential for the human-only web reveal path. Never exposed
-    /// through an MCP tool, and never written to logs or audit details.
-    pub fn service_credential(&self, id: &str) -> Result<String> {
-        Ok(self.get_service_record(id)?.credential)
-    }
-
-    pub fn remove_service_record(&self, id: &str) -> Result<()> {
-        self.require_management()?;
-        self.service_table()?;
-        self.lock_conn().execute("DELETE FROM mcp_services WHERE id=?1", [id])?;
-        Ok(())
-    }
-
     fn card_table(&self) -> Result<()> {
         self.lock_conn().execute("CREATE TABLE IF NOT EXISTS gateway_cards (id TEXT PRIMARY KEY, sealed BLOB NOT NULL)", [])?;
         Ok(())
     }
 
-    /// 写入或更新一张服务卡片。凭据留空表示保留原值。
-    pub fn put_service_card(&self, mut card: crate::gateway::ServiceCard) -> Result<()> {
+    /// 智能体通道：写入或更新一张服务卡片，需要临时管理开关。凭据留空表示保留原值。
+    pub fn put_service_card(&self, card: crate::gateway::ServiceCard) -> Result<()> {
         self.require_management()?;
+        self.put_card_impl(card)
+    }
+
+    /// 人工网页通道：人已通过统一登录，开关只约束智能体写入，这里不再要求开关。
+    pub fn put_service_card_by_human(&self, card: crate::gateway::ServiceCard) -> Result<()> {
+        self.put_card_impl(card)
+    }
+
+    fn put_card_impl(&self, mut card: crate::gateway::ServiceCard) -> Result<()> {
         card.validate()?;
         if card.credentials.is_empty() {
             if let Ok(existing) = self.get_service_card(&card.id) { card.credentials = existing.credentials; }
@@ -363,63 +323,18 @@ impl Vault {
 
     pub fn remove_service_card(&self, id: &str) -> Result<()> {
         self.require_management()?;
+        self.remove_card_impl(id)
+    }
+
+    /// 人工网页通道：同 put_service_card_by_human，不受开关约束。
+    pub fn remove_service_card_by_human(&self, id: &str) -> Result<()> {
+        self.remove_card_impl(id)
+    }
+
+    fn remove_card_impl(&self, id: &str) -> Result<()> {
         self.card_table()?;
         self.lock_conn().execute("DELETE FROM gateway_cards WHERE id=?1", [id])?;
         Ok(())
-    }
-
-    /// 卡片写入的内部通道：迁移时用，绕过管理开关。
-    fn put_card_internal(&self, card: &crate::gateway::ServiceCard) -> Result<()> {
-        self.card_table()?;
-        let bytes = serde_json::to_vec(card).map_err(|_| ConnectorError::internal("card serialization failed"))?;
-        let sealed = self.with_dek(|dek| seal(dek, &bytes))?;
-        self.lock_conn().execute("INSERT INTO gateway_cards (id,sealed) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed", rusqlite::params![card.id, sealed])?;
-        Ok(())
-    }
-
-    /// 把旧的 mcp_services 记录迁移成服务卡片。
-    /// 幂等：卡片表非空时直接返回 0，不会覆盖已有卡片。
-    /// 映射：exa→凭据作网址参数 exaApiKey；wechat/doubao→Authorization 头；github→环境变量 GH_TOKEN。
-    pub fn migrate_legacy_services(&self) -> Result<usize> {
-        self.card_table()?;
-        let existing: i64 = self.lock_conn().query_row("SELECT COUNT(*) FROM gateway_cards", [], |r| r.get(0))?;
-        if existing > 0 { return Ok(0); }
-        self.service_table()?;
-        let ids: Vec<String> = {
-            let conn = self.lock_conn();
-            let mut stmt = conn.prepare("SELECT id FROM mcp_services ORDER BY id")?;
-            stmt.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut n = 0;
-        for id in ids {
-            let rec = match self.get_service_record(&id) { Ok(r) => r, Err(_) => continue };
-            let host = reqwest::Url::parse(&rec.url).ok()
-                .and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
-            let (auth, header_name, key) = match rec.adapter.as_str() {
-                "exa" => ("query:exaApiKey", "", "EXA_API_KEY"),
-                "wechat" => ("header", "Authorization", "WECHAT_TOKEN"),
-                "doubao" => ("header", "Authorization", "DOUBAO_KEY"),
-                _ => ("none", "", "GH_TOKEN"),
-            };
-            let mut credentials = std::collections::BTreeMap::new();
-            if !rec.credential.is_empty() { credentials.insert(key.to_string(), rec.credential.clone()); }
-            let card = crate::gateway::ServiceCard {
-                id: rec.id.clone(),
-                name: rec.name.clone(),
-                addresses: if host.is_empty() { vec![] } else { vec![host] },
-                credentials,
-                auth: auth.to_string(),
-                header_name: header_name.to_string(),
-                endpoints: vec![],
-                notes: rec.notes.clone(),
-                timeout: None,
-            };
-            if card.validate().is_ok() {
-                self.put_card_internal(&card)?;
-                n += 1;
-            }
-        }
-        Ok(n)
     }
 
     /// Run a closure with the live DEK, or fail if locked.
@@ -849,28 +764,3 @@ mod management_grant_tests {
 }
 
 #[cfg(test)]
-mod service_registry_tests {
-    use super::*;
-    use crate::services::ServiceRecord;
-
-    #[test]
-    fn registry_requires_grant_encrypts_and_redacts_secret() {
-        let dir = std::env::temp_dir().join(format!("registry-test-{}", Vault::gen_id().unwrap()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let vault = Vault::open(&dir.join("vault.db"), &dir.join("runtime-key")).unwrap();
-        vault.init("test-master-password").unwrap();
-        vault.lock_management();
-        let mut record = ServiceRecord { id:"github".into(), name:"GitHub".into(), adapter:"github".into(), interface_type:String::new(), invocation_method:String::new(), url:String::new(), credential:"secret-registry-test".into(), tools:vec![crate::services::ServiceTool{name:"gh_status".into(), arguments:std::collections::HashMap::new()}], notes:"test".into() };
-        assert!(vault.put_service_record(record.clone()).is_err());
-        vault.open_management_grant().unwrap();
-        vault.put_service_record(record.clone()).unwrap();
-        assert!(vault.is_management_unlocked());
-        assert!(!vault.service_metadata().unwrap()[0].to_string().contains("secret-registry-test"));
-        record.credential.clear();
-        record.notes="edited".into();
-        vault.put_service_record(record).unwrap();
-        assert_eq!(vault.get_service_record("github").unwrap().credential,"secret-registry-test");
-        vault.lock_management();
-        assert!(vault.remove_service_record("github").is_err());
-    }
-}

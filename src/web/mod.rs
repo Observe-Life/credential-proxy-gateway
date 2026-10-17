@@ -163,11 +163,12 @@ async fn registry_list(State(st): State<Shared>) -> ApiResult {
     Ok(Json(json!({"services":st.vault.service_cards().map_err(ApiError::from)?})))
 }
 async fn registry_save(State(st): State<Shared>, Json(card): Json<crate::gateway::ServiceCard>) -> ApiResult {
-    st.vault.put_service_card(card).map_err(ApiError::from)?;
+    // 人已在统一登录态下；30 分钟开关只约束智能体写入，网页编辑不再要求它。
+    st.vault.put_service_card_by_human(card).map_err(ApiError::from)?;
     Ok(Json(json!({"ok":true})))
 }
 async fn registry_delete(State(st): State<Shared>, Path(id): Path<String>) -> ApiResult {
-    st.vault.remove_service_card(&id).map_err(ApiError::from)?;
+    st.vault.remove_service_card_by_human(&id).map_err(ApiError::from)?;
     Ok(Json(json!({"ok":true})))
 }
 
@@ -296,14 +297,31 @@ async fn close_session(State(st): State<Shared>, Path(id): Path<String>) -> ApiR
 struct AuditQuery {
     #[serde(default = "default_limit")]
     limit: usize,
+    #[serde(default = "default_page")]
+    page: usize,
 }
+fn default_page() -> usize {
+    1
+}
+
 fn default_limit() -> usize {
     200
 }
 
 async fn get_audit(State(st): State<Shared>, Query(q): Query<AuditQuery>) -> ApiResult {
-    let entries = st.audit.tail(q.limit.min(2000));
-    Ok(Json(json!({ "entries": entries })))
+    // 分页：page 从 1 开始，最新的一页是第 1 页。per_page 上限 200，前端默认 10。
+    let per_page = q.limit.clamp(1, 200);
+    let total = st.audit.total_lines();
+    let pages = total.div_ceil(per_page).max(1);
+    let page = q.page.clamp(1, pages);
+    let entries = st.audit.tail_page((page - 1) * per_page, per_page);
+    Ok(Json(json!({
+        "entries": entries,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages
+    })))
 }
 
 // --- WebSocket terminal takeover ---

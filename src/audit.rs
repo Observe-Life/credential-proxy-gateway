@@ -136,6 +136,25 @@ impl AuditLog {
         }
     }
 
+    /// 审计总条数，用于分页。
+    pub fn total_lines(&self) -> usize {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.audit_files_locked()
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .sum()
+    }
+
+    /// 分页读取（最新在前）：跳过最新的 `offset` 条，取 `limit` 条。
+    pub fn tail_page(&self, offset: usize, limit: usize) -> Vec<serde_json::Value> {
+        self.tail(offset.saturating_add(limit))
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+
     /// Read the most recent `limit` audit entries (newest first) as raw JSON
     /// values, scanning recent day-files. Used by the Web UI audit view.
     pub fn tail(&self, limit: usize) -> Vec<serde_json::Value> {

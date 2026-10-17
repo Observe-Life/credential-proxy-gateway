@@ -57,6 +57,7 @@ const el = {
   auditLoading:     () => $('audit-loading'),
   auditEmpty:       () => $('audit-empty'),
   auditList:        () => $('audit-list'),
+  auditPager:       () => $('audit-pager'),
   auditRefresh:     () => $('audit-refresh'),
   // Host modal
   hostModal:        () => $('host-modal'),
@@ -131,7 +132,7 @@ const api = {
   disconnectHost:  (id)     => apiFetch('POST',   `/hosts/${id}/disconnect`),
   getSessions:     ()       => apiFetch('GET',    '/sessions'),
   closeSession:    (id)     => apiFetch('POST',   `/sessions/${id}/close`),
-  getAudit:        ()       => apiFetch('GET',    '/audit?limit=200'),
+  getAudit:        (page = 1) => apiFetch('GET', `/audit?page=${page}&limit=10`),
 };
 
 // ── Toast notifications ─────────────────────────────────────────
@@ -850,20 +851,66 @@ function closeTerminal() {
 }
 
 // ── Audit view ──────────────────────────────────────────────────
-async function loadAudit() {
+let auditPage = 1;
+
+async function loadAudit(page = auditPage) {
   el.auditLoading().classList.remove('hidden');
   el.auditEmpty().classList.add('hidden');
   el.auditList().classList.add('hidden');
   el.auditStatus().classList.add('hidden');
+  el.auditPager().classList.add('hidden');
   try {
-    const data = await api.getAudit();
+    const data = await api.getAudit(page);
     const entries = Array.isArray(data) ? data : (data.entries || []);
+    auditPage = Array.isArray(data) ? 1 : (data.page || 1);
     renderAudit(entries);
+    if (!Array.isArray(data)) renderAuditPager(data);
   } catch (e) {
     showStatus(el.auditStatus(), describeError(e), 'error');
   } finally {
     el.auditLoading().classList.add('hidden');
   }
+}
+
+// 底部页码控件：上一页 / 输入页码跳转 / 下一页，并显示总页数与总条数。
+function renderAuditPager(data) {
+  const pager = el.auditPager();
+  const pages = Math.max(1, Number(data.pages) || 1);
+  const page = Math.max(1, Number(data.page) || 1);
+  pager.replaceChildren();
+
+  const prev = document.createElement('button');
+  prev.type = 'button'; prev.className = 'btn btn-ghost'; prev.textContent = '上一页';
+  prev.disabled = page <= 1;
+  prev.addEventListener('click', () => loadAudit(page - 1));
+
+  const next = document.createElement('button');
+  next.type = 'button'; next.className = 'btn btn-ghost'; next.textContent = '下一页';
+  next.disabled = page >= pages;
+  next.addEventListener('click', () => loadAudit(page + 1));
+
+  const wrap = document.createElement('span');
+  wrap.className = 'audit-page-input';
+  const input = document.createElement('input');
+  input.type = 'number'; input.min = '1'; input.max = String(pages); input.value = String(page);
+  input.setAttribute('aria-label', '页码');
+  const total = document.createElement('span');
+  total.className = 'audit-page-total';
+  total.textContent = ` / ${pages} 页 · 共 ${Number(data.total) || 0} 条`;
+  const jump = () => {
+    const target = Math.min(pages, Math.max(1, Number(input.value) || 1));
+    if (target !== page) loadAudit(target); else input.value = String(page);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); jump(); }
+  });
+  const go = document.createElement('button');
+  go.type = 'button'; go.className = 'btn'; go.textContent = '跳转';
+  go.addEventListener('click', jump);
+  wrap.append(input, total);
+
+  pager.append(prev, wrap, go, next);
+  pager.classList.remove('hidden');
 }
 
 function renderAudit(entries) {

@@ -459,18 +459,6 @@ fn merge_variants_into_object(
 pub struct CredentialResponse { pub result: Value }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct ServiceCall {
-    pub service_id: String,
-    /// 旧字段名 `tool` 与 AstrBot 的工具执行器关键字参数同名，会让调用必然失败
-    /// （got multiple values for keyword argument 'tool'），故改名为 tool_name，
-    /// 并保留旧名兼容，等所有调用方迁完再删别名。
-    #[serde(alias = "tool")]
-    pub tool_name: String,
-    /// 子参数包必须声明成对象：无类型字段在调用方构造参数时会退化成字符串，
-    /// 服务端取不到 command / Query 这类值，首次调用必然失败。
-    #[serde(default)] pub arguments: HashMap<String, Value>,
-}
-#[derive(Deserialize, JsonSchema)]
 pub struct ServiceId { pub id: String }
 
 #[derive(Deserialize, JsonSchema)]
@@ -488,7 +476,7 @@ pub struct GatewayCallMcp {
     /// 完整 MCP 端点，由模型每次给出
     pub url: String,
     pub tool_name: String,
-    /// 同 ServiceCall.arguments：声明为对象，避免自由形态参数被压成字符串。
+    /// 声明为对象：无类型字段在调用方构造参数时会退化成字符串，服务端取不到内容。
     #[serde(default)] pub arguments: HashMap<String, Value>,
 }
 
@@ -507,38 +495,13 @@ impl McpServer {
     // 外加建议性的常用端点与调用注意事项。网关只做三件事：按地址查凭据、注入、
     // 把响应里的凭据抹掉；方法/路径/参数/请求体都由模型自己决定，所以新增服务
     // 只需加一张卡片，不改代码。凭据永不进入模型上下文。
-    #[tool(description = "列出已注册MCP、可用工具及调用注意事项，凭据只显示是否配置。若用户要新增或修改MCP/SSH凭据，请提醒用户在凭证统一代理网关网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
-    async fn credential_registry(&self) -> Result<Json<CredentialResponse>, ErrorData> {
-        let records = self.state.vault.service_metadata().map_err(err_to_mcp)?;
-        Ok(Json(CredentialResponse { result:serde_json::json!({"services":records,"management_open":self.state.vault.is_management_unlocked(),"remaining_seconds":self.state.vault.management_remaining_seconds()}) }))
-    }
-    #[tool(description = "新增或修改MCP注册、工具列表、调用注意事项及写入凭据。必须先由用户在网页打开临时开关；凭据永不回显。留空credential保留原值。")]
-    async fn credential_register(&self, Parameters(record): Parameters<crate::services::ServiceRecord>) -> Result<Json<OkResult>, ErrorData> {
-        let id = record.id.clone();
-        let adapter = record.adapter.clone();
-        self.state.vault.put_service_record(record).map_err(err_to_mcp)?;
-        self.state.audit.record(AuditLog::entry("service_register").with_detail(serde_json::json!({"service":id,"adapter":adapter})));
-        Ok(Json(OkResult { ok:true }))
-    }
-    #[tool(description = "调用凭证统一代理网关中已注册的MCP工具。必填 service_id 与 tool_name（旧字段名 tool 仍兼容），arguments 填该工具的参数。service_id 取值与对应工具：exa＝web_search_exa；doubao＝doubao_web_search；wechat＝wechat_search_v2_fetch_search；github＝gh_status、gh_run、gh_git。GitHub：gh_run 执行 gh 子命令，gh_git 执行 git 子命令；两者都支持 cwd（默认 /app/data/github，git 操作务必指向仓库目录）与 timeout（秒，默认 120，最大 10800）。git 已默认注入 safe.directory 与 user.name/user.email，无需手工配置。各服务必备参数与注意事项以 credential_registry 返回的 tools/notes 为准。程序附加凭据，模型不接收密钥。")]
-    async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<CredentialResponse>, ErrorData> {
-        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool_name, serde_json::json!(req.arguments)).await.map_err(err_to_mcp)?;
-        Ok(Json(CredentialResponse { result:output }))
-    }
-    #[tool(description = "删除MCP注册。用户须在网页打开30分钟临时管理开关。")]
-    async fn credential_remove(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
-        self.state.vault.remove_service_record(&req.id).map_err(err_to_mcp)?;
-        self.state.audit.record(AuditLog::entry("service_remove").with_detail(serde_json::json!({"service":req.id})));
-        Ok(Json(OkResult { ok:true }))
-    }
-
-    #[tool(description = "列出所有服务卡片：名称、允许的地址、注入方式、建议的常用端点、调用注意事项，以及凭据配了哪几个字段（绝不返回值）。若用户要新增或修改卡片或凭据，请提醒用户在网页打开30分钟临时管理开关；不得要求用户在聊天发送密钥。")]
+                    #[tool(description = "调用任何外部服务前先读这里。返回每张卡片：名称、允许的地址、注入方式、常用端点、调用注意事项、代理去向回显，以及凭据配了哪几个字段（绝不返回值）。注意事项每次调用现读数据库，用户改完立即生效，不需要重启任何进程或重新握手。用户在网页上编辑卡片不需要临时开关；只有智能体自己写卡片才需要。不得要求用户在聊天发送密钥。")]
     async fn gateway_list_cards(&self) -> Result<Json<CredentialResponse>, ErrorData> {
         let cards = self.state.vault.service_cards().map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: serde_json::json!({"cards": cards, "management_open": self.state.vault.is_management_unlocked(), "remaining_seconds": self.state.vault.management_remaining_seconds()}) }))
     }
 
-    #[tool(description = "新增或修改一张服务卡片。字段：id；name；addresses（允许的地址，一组主机名，支持 *.example.com 且只匹配一层子域）；credentials（键值对，可多个字段如 AppKey + Secret；留空表示保留原值）；auth（bearer / header / basic / query:<参数名> / none）；header_name；endpoints（建议性的常用端点，只写用得上那几个）；notes（建议性注意事项，只写与调用直接相关的必要信息）；timeout。必须先由用户在网页打开临时管理开关；凭据永不回显。")]
+    #[tool(description = "新增或修改一张服务卡片（智能体通道，需要用户在网页打开30分钟临时管理开关；用户在网页上编辑不需要开）。字段：id；name；addresses（允许的地址，一组主机名，支持 *.example.com 且只匹配一层子域）；credentials（键值对，可多个字段如 AppKey + Secret；留空表示保留原值）；auth（bearer / header / basic / query:<参数名> / none）；header_name；endpoints（建议性的常用端点）；notes（调用注意事项——这是给智能体的提醒，写在这里会即时生效，不要写进工具说明）。凭据永不回显。")]
     async fn gateway_register_card(&self, Parameters(card): Parameters<crate::gateway::ServiceCard>) -> Result<Json<OkResult>, ErrorData> {
         let id = card.id.clone();
         let auth = card.auth.clone();
@@ -547,7 +510,7 @@ impl McpServer {
         Ok(Json(OkResult { ok:true }))
     }
 
-    #[tool(description = "删除一张服务卡片。用户须在网页打开30分钟临时管理开关。")]
+    #[tool(description = "删除一张服务卡片（智能体通道，需用户在网页打开30分钟临时管理开关）。")]
     async fn gateway_remove_card(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
         self.state.vault.remove_service_card(&req.id).map_err(err_to_mcp)?;
         self.state.audit.record(AuditLog::entry("card_remove").with_detail(serde_json::json!({"card":req.id})));

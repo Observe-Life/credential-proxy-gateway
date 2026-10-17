@@ -596,7 +596,15 @@ html,body{background:#faf8f5}body::before{display:none}
 #registry-list{display:grid;gap:12px;margin:18px 32px 32px}
 #registry-list article{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;padding:16px 18px;border:1px solid var(--color-border-subtle);border-radius:12px;background:rgba(255,255,255,.78);box-shadow:0 8px 20px rgba(77,42,30,.045)}
 #registry-list h3{font:600 16px/1.5 var(--font-ui);margin:0;overflow-wrap:anywhere}
-#registry-list p{grid-row:2;grid-column:1/-1;font-size:13px;line-height:1.7;color:var(--color-text-muted);margin:0;overflow-wrap:anywhere}
+/* 卡片里有两段 p（地址信息、调用注意事项）：不要钉死 grid-row，否则两段会叠在同一格。
+   交给自动放置，各占一行。 */
+#registry-list p{grid-column:1/-1;font-size:13px;line-height:1.7;color:var(--color-text-muted);margin:0;overflow-wrap:anywhere}
+
+.audit-pager{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;margin:16px 32px 32px}
+.audit-pager.hidden{display:none}
+.audit-page-input{display:flex;align-items:center;gap:6px}
+.audit-page-input input{width:78px;min-height:40px;text-align:center;font-size:15px;padding:0 8px}
+.audit-page-total{font-size:13px;color:var(--color-text-muted);white-space:nowrap}
 #registry-list button{grid-column:2;grid-row:1;min-height:40px;margin:0}
 
 /* Dialog reuses the SSH host modal appearance. */
@@ -632,6 +640,7 @@ html,body{background:#faf8f5}body::before{display:none}
  .nav-list{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;overflow:visible;padding:8px 12px 12px;margin:0}.nav-list li{min-width:0}.nav-item{width:100%;min-width:0;min-height:44px;padding:6px 2px;justify-content:center;text-align:center;font-size:15px;font-weight:700;white-space:nowrap;box-shadow:none}.sidebar-footer{display:none}.sidebar-panel{display:none}
  .grant-bar{margin:0 16px;padding:14px 0}.content{padding:0}
  #registry-list,#registry-message:not(.hidden){margin-left:16px;margin-right:16px}
+ .audit-pager{margin:14px 16px 24px;gap:8px}.audit-pager .btn{min-height:42px;flex:1 1 auto}
  .view-header{padding:20px 16px;gap:12px}.view-header h2{font-size:23px}
  #hosts-table-wrap,#sessions-table-wrap{max-width:100%;overflow-x:auto}.data-table{min-width:640px}
  .btn{min-height:42px;box-shadow:none}.btn:hover{transform:none}

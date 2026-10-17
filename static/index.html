@@ -64,7 +64,7 @@
       </section>
       <section id="view-registry" class="view" aria-label="MCP">
         <header class="view-header">
-          <div class="view-title-group"><h2>MCP</h2><p>工具说明可读；新增或修改前打开顶部临时开关。</p></div>
+          <div class="view-title-group"><h2>MCP</h2><p>网页上可直接新增或修改，保存立即生效；顶部的临时开关只控制智能体的写入权限。</p></div>
           <button type="button" class="btn btn-primary btn-sm" id="registry-new">+ 新增 MCP</button>
         </header>
         <div id="registry-list"></div>
@@ -156,7 +156,7 @@
           <div class="view-title-group">
             <span class="view-kicker">Audit</span>
             <h2>审计日志</h2>
-            <p>跟踪 vault、主机、命令、终端和文件传输操作。</p>
+            <p>跟踪设备、命令、终端、文件传输、服务调用与授权开关；每页 10 条，最新在前。</p>
           </div>
           <button id="audit-refresh" class="btn btn-ghost btn-sm">&#8635; 刷新</button>
         </header>
@@ -164,6 +164,7 @@
         <div id="audit-loading" class="loading-state hidden">加载中&hellip;</div>
         <div id="audit-empty" class="empty-state hidden">没有审计记录。</div>
         <div id="audit-list" class="audit-list hidden"></div>
+        <nav id="audit-pager" class="audit-pager hidden" aria-label="审计分页"></nav>
       </section>
       <section id="view-settings" class="view hidden" aria-label="设置">
         <header class="view-header"><div class="view-title-group"><h2>设置</h2><p>管理智能体与连接器之间的通信会话。</p></div></header>
@@ -173,7 +174,7 @@
           <p id="settings-help">范围：5～1440 分钟（24 小时），默认 120 分钟。此项不是 SSH 终端的空闲时间。</p>
           <p id="settings-runtime" role="status"></p>
           <button id="settings-save" type="submit" class="btn btn-primary">保存设置</button>
-          <p>打开顶部的“允许智能体管理凭据”后才能保存。修改后需重启本容器生效。</p>
+          <p>网页上保存立即生效，不需要重启。顶部的“允许智能体管理凭据”只影响智能体写入，不影响这里。</p>
           <div id="settings-status" role="status" aria-live="polite"></div>
         </form>
       </section>
