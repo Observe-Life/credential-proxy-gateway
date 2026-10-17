@@ -23,15 +23,27 @@ pub struct ServiceTool {
     #[serde(default)] pub arguments: HashMap<String, Value>,
 }
 
+/// 两种可接受的形状：对象列表（带参数示例）与纯字符串列表（只有工具名）。
+fn tools_from_value(raw: &Value) -> Option<Vec<ServiceTool>> {
+    if let Ok(v) = serde_json::from_value::<Vec<ServiceTool>>(raw.clone()) { return Some(v); }
+    if let Ok(v) = serde_json::from_value::<Vec<String>>(raw.clone()) {
+        return Some(v.into_iter().map(|name| ServiceTool { name, arguments: HashMap::new() }).collect());
+    }
+    None
+}
+
 /// 宽容读取 tools：历史数据里它可能被写成 JSON 字符串（无类型字段的老问题），
-/// 解析不出来就当空，绝不让一条坏记录炸掉整个注册表。
+/// 也可能只有一串工具名。尽量还原成提醒内容，实在读不出才退化为空——
+/// 绝不让一条坏记录炸掉整个注册表。
 fn lenient_tools<'de, D>(d: D) -> std::result::Result<Vec<ServiceTool>, D::Error>
 where D: serde::Deserializer<'de> {
     let raw = Value::deserialize(d)?;
     if raw.is_null() { return Ok(vec![]); }
-    if let Ok(v) = serde_json::from_value::<Vec<ServiceTool>>(raw.clone()) { return Ok(v); }
+    if let Some(v) = tools_from_value(&raw) { return Ok(v); }
     if let Some(s) = raw.as_str() {
-        if let Ok(v) = serde_json::from_str::<Vec<ServiceTool>>(s) { return Ok(v); }
+        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+            if let Some(v) = tools_from_value(&parsed) { return Ok(v); }
+        }
     }
     Ok(vec![])
 }
@@ -137,7 +149,7 @@ pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,args:Value)->Result<Value
 async fn invoke_record(record:&ServiceRecord,tool:&str,mut args:Value)->Result<Value>{
     let result=match record.adapter.as_str(){
         "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"Query required"))}let body=json!({"Query":q,"SearchType":"web","Count":number_arg(&args,"Count").or_else(||number_arg(&args,"count")).unwrap_or(10),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
-        "wechat"=>{if let Some(o)=args.as_object_mut(){o.entry("business_type".into()).or_insert(json!("article"));o.entry("sort".into()).or_insert(json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
+        "wechat"=>{if let Some(o)=args.as_object_mut(){o.entry("business_type".to_string()).or_insert(json!("article"));o.entry("sort".to_string()).or_insert(json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
         "exa"=>{if args.get("objective").and_then(Value::as_str).unwrap_or("").trim().is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"objective required"))}native_call(&record,tool,args).await?},
         "github"=>github_call(&record,tool,args).await?,
         _=>return Err(internal("adapter not supported")),
@@ -216,6 +228,26 @@ pub(crate) fn parse_command(s:&str)->Result<Vec<String>> {
     assert_eq!(parse_command(r#"--notes "a\"b""#).unwrap(),vec!["--notes","a\"b"]);
     assert!(parse_command("  ").is_err());
     assert!(parse_command("'unclosed").is_err());
+}
+#[test]fn tools_forms_decode_leniently(){
+    // 对象列表、纯名字列表、被压成字符串的列表，都要能还原
+    for raw in [
+        r#"[{"name":"gh_run","arguments":{"command":"gh子命令"}}]"#,
+        r#"["gh_status"]"#,
+    ] {
+        let v: Value = serde_json::from_str(raw).unwrap();
+        for shape in [v.clone(), Value::String(raw.to_string())] {
+            let s = ServiceRecord{
+                id:"t".into(),name:"t".into(),adapter:"github".into(),
+                interface_type:String::new(),invocation_method:String::new(),
+                url:String::new(),credential:String::new(),
+                tools:tools_from_value(&shape).unwrap_or_default(),
+                notes:String::new(),
+            };
+            assert!(!s.tools.is_empty(), "tools 不该被静默丢弃: {shape}");
+            assert_eq!(s.tools[0].name, if raw.contains("gh_run") {"gh_run"} else {"gh_status"});
+        }
+    }
 }
 #[test]fn service_arguments_and_redaction(){assert_eq!(parse_command("issue create --title '中文 标题'").unwrap(),vec!["issue","create","--title","中文 标题"]);assert!(parse_command("'unclosed").is_err());assert_eq!(redact("Bearer secret","secret"),"Bearer [凭据已隐藏]");let mut v=json!({"title":"<em class=\"highlight\">中文</em>","date":0});clean_wechat(&mut v);assert_eq!(v["title"],"中文");assert!(v.get("date_local").is_some());}}
 
