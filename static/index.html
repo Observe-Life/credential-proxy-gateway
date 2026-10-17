@@ -80,14 +80,14 @@
             <div class="modal-body">
               <div class="field-group"><label for="rf-id">标识 <span class="required" aria-hidden="true">*</span></label><input id="rf-id" name="id" required placeholder="例如 mineru" /></div>
               <div class="field-group"><label for="rf-name">名称 <span class="required" aria-hidden="true">*</span></label><input id="rf-name" name="name" required placeholder="例如 MinerU 文档解析" /></div>
-              <div class="field-group"><label for="rf-addresses">允许的地址 <span class="required" aria-hidden="true">*</span></label><textarea id="rf-addresses" name="addresses" rows="3" placeholder="一行一个主机名，例如&#10;mineru.net&#10;*.aliyuncs.com"></textarea><span class="hint">只往这些地址注入凭据；支持 *.example.com，只匹配一层子域。</span></div>
+              <div class="field-group"><label for="rf-addresses">服务方网址</label><input id="rf-addresses" name="addresses" placeholder="https://mcp.tikhub.io/wechat/mcp" /><span class="hint">整张卡片只有这里能填网址。填了它，智能体调用时直接取用、不用再拼；也可以只填主机名或 *.example.com。本地命令类可留空。</span></div>
               <div class="field-group"><label for="rf-auth">注入方式 <span class="required" aria-hidden="true">*</span></label><select id="rf-auth" name="auth"><option value="bearer">Authorization: Bearer（最常见）</option><option value="header">自定义请求头</option><option value="basic">Authorization: Basic</option><option value="query">网址参数</option><option value="none">不注入</option></select><span class="hint" id="auth-hint"></span></div>
               <div class="field-group" id="rf-header-group" style="display:none"><label for="rf-header-name">请求头名</label><input id="rf-header-name" name="header_name" placeholder="例如 X-API-Key" /></div>
               <div class="field-group" id="rf-query-group" style="display:none"><label for="rf-query-param">网址参数名</label><input id="rf-query-param" name="query_param" placeholder="例如 token" /></div>
               <div class="field-group"><label for="rf-credentials">凭据</label>
                 <div class="credential-row"><textarea id="rf-credentials" name="credentials" rows="3" autocomplete="off" spellcheck="false" placeholder="每行一个 KEY=VALUE，例如&#10;TOKEN=sk-xxx"></textarea><button type="button" id="credential-copy" class="btn">复制</button></div>
                 <span class="hint">明文只在本网页显示；凭据只用于注入外发请求，智能体读不到值。留空表示保留原值。</span></div>
-              <div class="field-group"><label for="rf-endpoints">常用端点（建议）</label><textarea id="rf-endpoints" name="endpoints" rows="4" placeholder="每行一个，格式：方法 路径 说明&#10;POST /api/v4/extract/task 提交解析任务"></textarea><span class="hint">只是提醒智能体常用哪几个，不限制它用别的。</span></div>
+              <div class="field-group"><label for="rf-endpoints">常用工具名（建议）</label><textarea id="rf-endpoints" name="endpoints" rows="4" placeholder="MCP 服务：一行一个工具名，例如&#10;wechat_search_v2_fetch_search&#10;或 服务名.工具名&#10;HTTP 服务：方法 路径 说明，例如 POST /api/v4/extract/task 提交任务"></textarea><span class="hint">只是提醒智能体常用哪几个，不限制它用别的。</span></div>
               <div class="field-group"><label for="rf-notes">调用注意事项（建议）</label><textarea id="rf-notes" name="notes" rows="4" placeholder="只写与调用直接相关的必要信息"></textarea></div>
             </div>
             <div class="modal-footer">

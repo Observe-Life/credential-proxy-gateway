@@ -1149,7 +1149,7 @@ function openEditor(item,trigger){
   const f=$('registry-form');f.reset();editorTrigger=trigger;
   f.elements.id.value=item?.id||'';f.elements.id.readOnly=!!item;
   f.elements.name.value=item?.name||'';
-  f.elements.addresses.value=(item?.addresses||[]).join('\n');
+  f.elements.addresses.value=(item?.addresses||[])[0]||'';
   const a=item?.auth||'bearer';
   f.elements.auth.value=a.startsWith('query:')?'query':a;
   f.elements.header_name.value=item?.header_name||'';
@@ -1179,7 +1179,7 @@ async function loadRegistry(){
     for(const item of result.services){
       const node=document.createElement('article'),title=document.createElement('h3'),meta=document.createElement('p'),notes=document.createElement('p'),button=document.createElement('button');
       title.textContent=item.name;
-      meta.textContent='允许的地址：'+((item.addresses||[]).join('、')||'（未填）')+' ｜ 注入方式：'+(item.auth||'-');
+      meta.textContent='服务方网址：'+(((item.addresses||[])[0])||'（未填）')+' ｜ 注入方式：'+(item.auth||'-');
       notes.textContent=item.notes||'（未填写调用注意事项）';
       button.textContent='编辑';button.type='button';button.className='btn btn-ghost';button.onclick=()=>openEditor(item,button);
       node.append(title,meta,notes,button);box.append(node);
@@ -1204,7 +1204,7 @@ $('registry-form').addEventListener('submit',async e=>{
   try{
     const a=f.elements.auth.value;
     const card={id:f.elements.id.value.trim(),name:f.elements.name.value.trim(),
-      addresses:splitLines(f.elements.addresses.value),
+      addresses:(()=>{const v=f.elements.addresses.value.trim();return v?[v]:[]})(),
       credentials:{},auth:a==='query'?('query:'+f.elements.query_param.value.trim()):a,
       header_name:f.elements.header_name.value.trim(),
       endpoints:splitLines(f.elements.endpoints.value).map(l=>{const p=l.split(/\s+/);return{method:p[0]||'',path:p[1]||'',summary:p.slice(2).join(' ')}}),

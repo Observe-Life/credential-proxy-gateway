@@ -99,6 +99,7 @@ impl ServiceCard {
             "id": self.id,
             "name": self.name,
             "addresses": self.addresses,
+            "endpoint": self.endpoint(),
             "auth": self.auth,
             "header_name": self.header_name,
             "endpoints": self.endpoints,
@@ -113,6 +114,16 @@ impl ServiceCard {
         })
     }
 
+    /// 卡片里登记的第一个完整网址，作为这类服务的默认入口。
+    /// 服务方给的原始信息通常就是完整网址，有了它调用时不必再拼。
+    pub fn endpoint(&self) -> Option<String> {
+        self.addresses
+            .iter()
+            .map(|a| a.trim())
+            .find(|a| a.contains("://"))
+            .map(str::to_string)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.id.is_empty()
             || self.id.len() > 64
@@ -124,9 +135,29 @@ impl ServiceCard {
             return Err(bad("卡片编号只能用字母、数字、下划线或短横线，且不超过 64 字符"));
         }
         // 允许为空：本地命令类不需要地址。为空时任何 HTTP 目标都会被拒，是安全方向。
+        // 服务方网址只填一个：这是调用时直接取用的入口，也是凭据可去的边界。
+        if self.addresses.len() > 1 {
+            return Err(bad("服务方网址只能填一个"));
+        }
+        // 允许直接填完整网址（服务方给的原始信息常是这样）：入库保留原样，比较时只取主机名。
         for a in &self.addresses {
-            if a.trim().is_empty() || a.contains('/') || a.contains(' ') {
-                return Err(bad("允许的地址只填主机名，例如 api.example.com 或 *.example.com"));
+            let a = a.trim();
+            if a.is_empty() || a.contains(' ') {
+                return Err(bad("允许的地址不能为空，也不能含空格"));
+            }
+            if a.contains("://") {
+                let u = reqwest::Url::parse(a).map_err(|_| bad("这个地址不是合法网址"))?;
+                if !matches!(u.scheme(), "http" | "https") {
+                    return Err(bad("只有 http/https 网址可以这样填"));
+                }
+                if !u.username().is_empty() || u.password().is_some() {
+                    return Err(bad("网址里不允许带用户名密码"));
+                }
+                if u.host_str().unwrap_or("").is_empty() {
+                    return Err(bad("网址里没有主机名"));
+                }
+            } else if a.contains('/') {
+                return Err(bad("只填主机名时不要带路径：要么填完整网址，要么只填主机名"));
             }
         }
         match self.auth.as_str() {
@@ -171,7 +202,8 @@ fn internal(m: &str) -> ConnectorError {
 pub fn host_allowed(host: &str, patterns: &[String]) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     patterns.iter().any(|p| {
-        let p = p.trim_end_matches('.').to_ascii_lowercase();
+        // 卡片允许直接填完整网址（服务方给的原始信息常是这样），比较时只取主机部分。
+        let p = pattern_host(p).trim_end_matches('.').to_ascii_lowercase();
         match p.strip_prefix("*.") {
             Some(base) => {
                 host.ends_with(&format!(".{base}")) && host.matches('.').count() == base.matches('.').count() + 1
@@ -179,6 +211,17 @@ pub fn host_allowed(host: &str, patterns: &[String]) -> bool {
             None => host == p,
         }
     })
+}
+
+/// 把一条允许地址规范化成主机名：完整网址取主机，其余原样返回。
+fn pattern_host(p: &str) -> String {
+    let p = p.trim();
+    if p.contains("://") {
+        if let Ok(u) = reqwest::Url::parse(p) {
+            if let Some(h) = u.host_str() { return h.to_string(); }
+        }
+    }
+    p.to_string()
 }
 
 /// 校验目标地址：协议只允许 http/https，主机必须在允许清单里。
@@ -638,7 +681,7 @@ mod tests {
         ServiceCard {
             id: "mineru".into(),
             name: "MinerU".into(),
-            addresses: vec!["mineru.net".into(), "*.aliyuncs.com".into()],
+            addresses: vec!["mineru.net".into()],
             credentials: BTreeMap::from([("KEY".to_string(), "sk-secret-value".to_string())]),
             auth: "bearer".into(),
             header_name: String::new(),
@@ -674,6 +717,30 @@ mod tests {
         ] {
             assert!(!command_invokes_git(no), "不应误判为 git: {no}");
         }
+    }
+
+    #[test]
+    fn service_url_accepts_full_url_and_hostname() {
+        // 服务方给的是完整网址：入库原样保留，匹配时只取主机。
+        let a = vec!["https://mcp.tikhub.io/wechat/mcp".to_string()];
+        assert!(host_allowed("mcp.tikhub.io", &a));
+        assert!(!host_allowed("evil.com", &a));
+        let b = vec!["*.aliyuncs.com".to_string()];
+        assert!(host_allowed("bucket.aliyuncs.com", &b));
+        assert!(!host_allowed("a.b.aliyuncs.com", &b), "通配只匹配一层");
+    }
+
+    #[test]
+    fn service_url_is_single_valued() {
+        let mut c = card();
+        assert!(c.validate().is_ok());
+        c.addresses = vec!["a.example.com".into(), "b.example.com".into()];
+        assert!(c.validate().is_err(), "服务方网址只能填一个");
+        c.addresses = vec!["https://mcp.tikhub.io/wechat/mcp".into()];
+        assert!(c.validate().is_ok(), "完整网址应当被接受");
+        assert_eq!(c.endpoint().as_deref(), Some("https://mcp.tikhub.io/wechat/mcp"));
+        c.addresses = vec!["https://user:pass@evil.com/x".into()];
+        assert!(c.validate().is_err(), "网址里不允许带凭据");
     }
 
     #[test]

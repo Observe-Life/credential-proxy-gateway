@@ -51,6 +51,19 @@ fn audit_call(
     state.audit.record(AuditLog::entry(action).with_detail(detail));
 }
 
+/// 调用时的地址来源：优先用调用方给的，没给就用卡片里登记的"服务方网址"。
+/// 这样服务方给的原始网址只需填一次，模型不必每次拼。
+fn resolve_url(card: &crate::gateway::ServiceCard, given: &str) -> std::result::Result<String, ErrorData> {
+    let given = given.trim();
+    if !given.is_empty() {
+        return Ok(given.to_string());
+    }
+    card.endpoint().ok_or_else(|| err_to_mcp(ConnectorError::new(
+        crate::error::ErrorCode::BadRequest,
+        "这张卡片没有填服务方网址：请在卡片里填一个网址，或在调用时给出完整网址",
+    )))
+}
+
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
     // can branch on `code` (e.g. host_key_mismatch vs auth_failed).
@@ -473,8 +486,8 @@ pub struct GatewayRequest {
 #[derive(Deserialize, JsonSchema)]
 pub struct GatewayCallMcp {
     pub card_id: String,
-    /// 完整 MCP 端点，由模型每次给出
-    pub url: String,
+    /// 完整 MCP 端点。留空则用卡片里登记的"服务方网址"。
+    #[serde(default)] pub url: String,
     pub tool_name: String,
     /// 声明为对象：无类型字段在调用方构造参数时会退化成字符串，服务端取不到内容。
     #[serde(default)] pub arguments: HashMap<String, Value>,
@@ -532,10 +545,11 @@ impl McpServer {
     #[tool(description = "按 MCP 协议调用一次远程服务（exa、微信公众号这类）。程序先握手再调用你指定的 tool_name：tool_name 是该服务提供的工具名，arguments 是它的参数。card_id 指卡片（地址与凭据都按卡片来），url 是完整 MCP 端点（必须在该卡片的允许地址内）。程序按卡片附加凭据，并把返回里出现的凭据抹掉。")]
     async fn gateway_call_mcp(&self, Parameters(req): Parameters<GatewayCallMcp>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
-        let outcome = crate::gateway::execute_mcp(&card, &req.url, &req.tool_name, serde_json::json!(req.arguments)).await;
+        let url = match resolve_url(&card, &req.url) { Ok(u) => u, Err(e) => return Err(e) };
+        let outcome = crate::gateway::execute_mcp(&card, &url, &req.tool_name, serde_json::json!(req.arguments)).await;
         match &outcome {
-            Ok(_) => audit_call(&self.state, "gateway_call_mcp", &card, serde_json::json!({"card":req.card_id,"url":req.url,"tool":req.tool_name})),
-            Err(e) => audit_call(&self.state, "gateway_call_mcp_failed", &card, serde_json::json!({"card":req.card_id,"url":req.url,"tool":req.tool_name,"code":e.code.as_str(),"message":e.message})),
+            Ok(_) => audit_call(&self.state, "gateway_call_mcp", &card, serde_json::json!({"card":req.card_id,"url":url,"tool":req.tool_name})),
+            Err(e) => audit_call(&self.state, "gateway_call_mcp_failed", &card, serde_json::json!({"card":req.card_id,"url":url,"tool":req.tool_name,"code":e.code.as_str(),"message":e.message})),
         }
         let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
