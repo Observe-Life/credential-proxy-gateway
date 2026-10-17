@@ -148,9 +148,9 @@ pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,args:Value)->Result<Value
 }
 async fn invoke_record(record:&ServiceRecord,tool:&str,mut args:Value)->Result<Value>{
     let result=match record.adapter.as_str(){
-        "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"Query required"))}let body=json!({"Query":q,"SearchType":"web","Count":number_arg(&args,"Count").or_else(||number_arg(&args,"count")).unwrap_or(10),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
+        "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"要在 arguments 里给 Query（搜索词），例如 {\"Query\":\"Rust 编程语言\"}"))}let body=json!({"Query":q,"SearchType":"web","Count":number_arg(&args,"Count").or_else(||number_arg(&args,"count")).unwrap_or(10),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
         "wechat"=>{if let Some(o)=args.as_object_mut(){o.entry("business_type".to_string()).or_insert(json!("article"));o.entry("sort".to_string()).or_insert(json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
-        "exa"=>{if args.get("objective").and_then(Value::as_str).unwrap_or("").trim().is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"objective required"))}native_call(&record,tool,args).await?},
+        "exa"=>{if args.get("objective").and_then(Value::as_str).unwrap_or("").trim().is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"要在 arguments 里给 objective（说清要什么、排除什么），它和 query 一样是上游必填项"))}native_call(&record,tool,args).await?},
         "github"=>github_call(&record,tool,args).await?,
         _=>return Err(internal("adapter not supported")),
     };
@@ -176,9 +176,9 @@ async fn github_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
     let cwd=args.get("cwd").and_then(Value::as_str).unwrap_or("/app/data/github").to_string();
     let _permit=github_gate().acquire().await.map_err(|_|internal("GitHub concurrency gate unavailable"))?;
     let dir=dir_gate(&cwd);let _dir_guard=dir.lock().await;
-    let mut cmd=match tool{"gh_git"=>tokio::process::Command::new("git"),"gh_run"|"gh_status"=>tokio::process::Command::new("gh"),_=>return Err(ConnectorError::new(ErrorCode::BadRequest,"unknown GitHub tool"))};
+    let mut cmd=match tool{"gh_git"=>tokio::process::Command::new("git"),"gh_run"|"gh_status"=>tokio::process::Command::new("gh"),_=>return Err(ConnectorError::new(ErrorCode::BadRequest,"GitHub 工具名不对，可选 gh_status / gh_run / gh_git"))};
     if tool=="gh_status"{cmd.args(["auth","status"]);}else{
-        let command=args.get("command").and_then(Value::as_str).ok_or_else(||ConnectorError::new(ErrorCode::BadRequest,"command required"))?;
+        let command=args.get("command").and_then(Value::as_str).ok_or_else(||ConnectorError::new(ErrorCode::BadRequest,"要在 arguments 里给 command：gh_run 填 gh 的子命令、gh_git 填 git 的子命令，例如 {\"command\":\"repo list --limit 3\"}"))?;
         let argv=parse_command(command)?;cmd.args(argv);
     }
     tokio::fs::create_dir_all(&cwd).await.map_err(|_|internal("GitHub work directory unavailable"))?;cmd.current_dir(&cwd);
@@ -216,7 +216,7 @@ pub(crate) fn parse_command(s:&str)->Result<Vec<String>> {
             }
         }
     }
-    if quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"unclosed command quoting"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"empty command"))}Ok(words)
+    if quote.is_some(){return Err(ConnectorError::new(ErrorCode::BadRequest,"命令里的引号没有成对闭合，请检查单引号或双引号"))}if started{words.push(word)}if words.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"command 不能为空"))}Ok(words)
 }
 #[cfg(test)]mod tests{use super::*;
 #[test]fn command_parser_keeps_backslashes(){
