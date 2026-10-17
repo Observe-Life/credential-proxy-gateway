@@ -10,6 +10,7 @@
 //! - `run_stdio_shim` is a thin stdio<->HTTP forwarder so editors that speak
 //!   stdio MCP can reach a already-running daemon.
 
+use crate::audit::AuditLog;
 use crate::error::ConnectorError;
 use crate::state::AppState;
 use crate::types::{ExecPayload, HostSpec, KeyName};
@@ -21,8 +22,34 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// 目录列表的上下文体积保护：默认回 200 条，最多 2000 条。
+/// 这不是安全边界，多出来的条目会被标记，调用方可以要更多或换更窄的路径。
+const SFTP_LIST_DEFAULT: usize = 200;
+const SFTP_LIST_MAX: usize = 2000;
+
+/// 服务调用面审计：动作 + 卡片 + 目标/命令摘要（先抹凭据再限长）+ 结果。
+/// 失败同样要记，否则越界试探完全不留痕。
+fn audit_call(
+    state: &AppState,
+    action: &str,
+    card: &crate::gateway::ServiceCard,
+    mut detail: serde_json::Value,
+) {
+    let values = card.values();
+    if let Some(map) = detail.as_object_mut() {
+        for key in ["url", "command", "cwd", "message"] {
+            if let Some(text) = map.get(key).and_then(Value::as_str).map(str::to_owned) {
+                let cut: String = crate::gateway::scrub_all(&text, &values).chars().take(240).collect();
+                map.insert(key.to_string(), Value::String(cut));
+            }
+        }
+    }
+    state.audit.record(AuditLog::entry(action).with_detail(detail));
+}
 
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
@@ -147,6 +174,8 @@ pub struct ResizeRequest {
 pub struct SftpListRequest {
     pub host_id: String,
     pub path: String,
+    /// 想拿回多少条：缺省 200，最多 2000。只是体积控制，不是权限。
+    #[serde(default)] pub max_entries: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -258,6 +287,10 @@ pub struct SessionListResult {
 #[derive(Debug, serde::Serialize, JsonSchema)]
 pub struct SftpListResult {
     pub entries: Vec<DirEntry>,
+    /// 目录里实际有多少条
+    pub total: usize,
+    /// true 表示还有没返回的条目，可以用 max_entries 或更窄路径继续取
+    pub truncated: bool,
 }
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
@@ -433,7 +466,9 @@ pub struct ServiceCall {
     /// 并保留旧名兼容，等所有调用方迁完再删别名。
     #[serde(alias = "tool")]
     pub tool_name: String,
-    #[serde(default)] pub arguments: Value,
+    /// 子参数包必须声明成对象：无类型字段在调用方构造参数时会退化成字符串，
+    /// 服务端取不到 command / Query 这类值，首次调用必然失败。
+    #[serde(default)] pub arguments: HashMap<String, Value>,
 }
 #[derive(Deserialize, JsonSchema)]
 pub struct ServiceId { pub id: String }
@@ -453,7 +488,8 @@ pub struct GatewayCallMcp {
     /// 完整 MCP 端点，由模型每次给出
     pub url: String,
     pub tool_name: String,
-    #[serde(default)] pub arguments: Value,
+    /// 同 ServiceCall.arguments：声明为对象，避免自由形态参数被压成字符串。
+    #[serde(default)] pub arguments: HashMap<String, Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -478,17 +514,21 @@ impl McpServer {
     }
     #[tool(description = "新增或修改MCP注册、工具列表、调用注意事项及写入凭据。必须先由用户在网页打开临时开关；凭据永不回显。留空credential保留原值。")]
     async fn credential_register(&self, Parameters(record): Parameters<crate::services::ServiceRecord>) -> Result<Json<OkResult>, ErrorData> {
+        let id = record.id.clone();
+        let adapter = record.adapter.clone();
         self.state.vault.put_service_record(record).map_err(err_to_mcp)?;
+        self.state.audit.record(AuditLog::entry("service_register").with_detail(serde_json::json!({"service":id,"adapter":adapter})));
         Ok(Json(OkResult { ok:true }))
     }
     #[tool(description = "调用凭证统一代理网关中已注册的MCP工具。必填 service_id 与 tool_name（旧字段名 tool 仍兼容），arguments 填该工具的参数。service_id 取值与对应工具：exa＝web_search_exa；doubao＝doubao_web_search；wechat＝wechat_search_v2_fetch_search；github＝gh_status、gh_run、gh_git。GitHub：gh_run 执行 gh 子命令，gh_git 执行 git 子命令；两者都支持 cwd（默认 /app/data/github，git 操作务必指向仓库目录）与 timeout（秒，默认 120，最大 10800）。git 已默认注入 safe.directory 与 user.name/user.email，无需手工配置。各服务必备参数与注意事项以 credential_registry 返回的 tools/notes 为准。程序附加凭据，模型不接收密钥。")]
     async fn credential_invoke(&self, Parameters(req): Parameters<ServiceCall>) -> Result<Json<CredentialResponse>, ErrorData> {
-        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool_name, req.arguments).await.map_err(err_to_mcp)?;
+        let output = crate::services::invoke(self.state.clone(), &req.service_id, &req.tool_name, serde_json::json!(req.arguments)).await.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result:output }))
     }
     #[tool(description = "删除MCP注册。用户须在网页打开30分钟临时管理开关。")]
     async fn credential_remove(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
         self.state.vault.remove_service_record(&req.id).map_err(err_to_mcp)?;
+        self.state.audit.record(AuditLog::entry("service_remove").with_detail(serde_json::json!({"service":req.id})));
         Ok(Json(OkResult { ok:true }))
     }
 
@@ -500,27 +540,41 @@ impl McpServer {
 
     #[tool(description = "新增或修改一张服务卡片。字段：id；name；addresses（允许的地址，一组主机名，支持 *.example.com 且只匹配一层子域）；credentials（键值对，可多个字段如 AppKey + Secret；留空表示保留原值）；auth（bearer / header / basic / query:<参数名> / none）；header_name；endpoints（建议性的常用端点，只写用得上那几个）；notes（建议性注意事项，只写与调用直接相关的必要信息）；timeout。必须先由用户在网页打开临时管理开关；凭据永不回显。")]
     async fn gateway_register_card(&self, Parameters(card): Parameters<crate::gateway::ServiceCard>) -> Result<Json<OkResult>, ErrorData> {
+        let id = card.id.clone();
+        let auth = card.auth.clone();
         self.state.vault.put_service_card(card).map_err(err_to_mcp)?;
+        self.state.audit.record(AuditLog::entry("card_register").with_detail(serde_json::json!({"card":id,"auth":auth})));
         Ok(Json(OkResult { ok:true }))
     }
 
     #[tool(description = "删除一张服务卡片。用户须在网页打开30分钟临时管理开关。")]
     async fn gateway_remove_card(&self, Parameters(req): Parameters<ServiceId>) -> Result<Json<OkResult>, ErrorData> {
         self.state.vault.remove_service_card(&req.id).map_err(err_to_mcp)?;
+        self.state.audit.record(AuditLog::entry("card_remove").with_detail(serde_json::json!({"card":req.id})));
         Ok(Json(OkResult { ok:true }))
     }
 
     #[tool(description = "按服务卡片发一次 HTTP 请求。方法、完整网址、请求头和请求体都由你决定；程序按卡片校验目标主机、按卡片的注入方式附加凭据，再把响应里出现的凭据抹掉，所以你看不到凭据的值。目标主机必须在该卡片的 addresses 里，否则直接拒绝。不要自带 Host、Forwarded、X-Forwarded-* 这类会改道请求的头，也不要试图把凭据值写进请求，两者都会被拒。跳转允许，但跳到卡片地址之外的地址时不会带凭据。")]
     async fn gateway_request(&self, Parameters(req): Parameters<GatewayRequest>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
-        let out = crate::gateway::execute_http(&card, &req.method, &req.url, req.headers, req.body).await.map_err(err_to_mcp)?;
+        let outcome = crate::gateway::execute_http(&card, &req.method, &req.url, req.headers, req.body).await;
+        match &outcome {
+            Ok(v) => audit_call(&self.state, "gateway_request", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":req.url,"status":v.get("status")})),
+            Err(e) => audit_call(&self.state, "gateway_request_failed", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":req.url,"code":e.code.as_str(),"message":e.message})),
+        }
+        let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
     }
 
     #[tool(description = "按 MCP 协议调用一次远程服务（exa、微信公众号这类）。程序先握手再调用你指定的 tool_name：tool_name 是该服务提供的工具名，arguments 是它的参数。card_id 指卡片（地址与凭据都按卡片来），url 是完整 MCP 端点（必须在该卡片的允许地址内）。程序按卡片附加凭据，并把返回里出现的凭据抹掉。")]
     async fn gateway_call_mcp(&self, Parameters(req): Parameters<GatewayCallMcp>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
-        let out = crate::gateway::execute_mcp(&card, &req.url, &req.tool_name, req.arguments).await.map_err(err_to_mcp)?;
+        let outcome = crate::gateway::execute_mcp(&card, &req.url, &req.tool_name, serde_json::json!(req.arguments)).await;
+        match &outcome {
+            Ok(_) => audit_call(&self.state, "gateway_call_mcp", &card, serde_json::json!({"card":req.card_id,"url":req.url,"tool":req.tool_name})),
+            Err(e) => audit_call(&self.state, "gateway_call_mcp_failed", &card, serde_json::json!({"card":req.card_id,"url":req.url,"tool":req.tool_name,"code":e.code.as_str(),"message":e.message})),
+        }
+        let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
     }
 
@@ -528,7 +582,12 @@ impl McpServer {
     async fn gateway_run(&self, Parameters(req): Parameters<GatewayRun>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
         let cwd = req.cwd.unwrap_or_else(|| "/app/data/github".to_string());
-        let out = crate::gateway::execute_command(&card, &req.command, &cwd, req.timeout.unwrap_or(120)).await.map_err(err_to_mcp)?;
+        let outcome = crate::gateway::execute_command(&card, &req.command, &cwd, req.timeout.unwrap_or(120)).await;
+        match &outcome {
+            Ok(v) => audit_call(&self.state, "gateway_run", &card, serde_json::json!({"card":req.card_id,"command":req.command,"cwd":cwd,"exit_code":v.get("exit_code")})),
+            Err(e) => audit_call(&self.state, "gateway_run_failed", &card, serde_json::json!({"card":req.card_id,"command":req.command,"cwd":cwd,"code":e.code.as_str(),"message":e.message})),
+        }
+        let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
     }
 
@@ -742,7 +801,7 @@ impl McpServer {
         Ok(Json(OkResult { ok: true }))
     }
 
-    #[tool(description = "List a remote directory over SFTP.")]
+    #[tool(description = "List a remote directory over SFTP. 默认最多返回 200 条（max_entries 可调，上限 2000）；truncated=true 表示还有更多，请改用更窄的路径或 exec 的 ls 继续取，不要重复整目录拉取。")]
     async fn sftp_list(
         &self,
         Parameters(req): Parameters<SftpListRequest>,
@@ -752,7 +811,10 @@ impl McpServer {
             .sftp_list(&req.host_id, &req.path)
             .await
             .map_err(err_to_mcp)?;
-        Ok(Json(SftpListResult { entries }))
+        let total = entries.len();
+        let cap = req.max_entries.unwrap_or(SFTP_LIST_DEFAULT).clamp(1, SFTP_LIST_MAX);
+        let truncated = total > cap;
+        Ok(Json(SftpListResult { entries: entries.into_iter().take(cap).collect(), total, truncated }))
     }
 
     #[tool(

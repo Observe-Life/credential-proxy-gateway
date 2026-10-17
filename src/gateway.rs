@@ -105,6 +105,11 @@ impl ServiceCard {
             "notes": self.notes,
             "credential_fields": self.credentials.keys().collect::<Vec<_>>(),
             "has_credential": !self.credentials.is_empty(),
+            // 代理去向如实回显：出站代理是容器环境变量决定的，代码不拦、也不猜。
+            // 配置者看到 proxy_configured=true 而 bypass_matched 为空，就该明白
+            // 这张卡片的请求会经代理转发，是否把地址加进 NO_PROXY 由人决定。
+            "proxy_configured": proxy_configured(),
+            "bypass_matched": self.addresses.iter().filter(|a| no_proxy_covers(a)).cloned().collect::<Vec<_>>(),
         })
     }
 
@@ -233,6 +238,25 @@ pub fn scrub_all(text: &str, values: &BTreeMap<String, String>) -> String {
     out
 }
 
+/// 环境里是否配了出站代理。
+pub fn proxy_configured() -> bool {
+    ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .any(|k| !std::env::var(k).unwrap_or_default().trim().is_empty())
+}
+
+/// 主机是否被 NO_PROXY 覆盖：支持逗号分隔、前导点、`*` 全局与通配卡片地址。
+pub fn no_proxy_covers(host: &str) -> bool {
+    let raw = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .unwrap_or_default();
+    let h = host.trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase();
+    raw.split(',')
+        .map(|e| e.trim().trim_start_matches('.').trim_start_matches("*.").to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .any(|e| e == "*" || h == e || h.ends_with(&format!(".{e}")))
+}
+
 /// 按卡片的注入方式，把凭据附加到外发请求上。
 /// 返回（可能被改写的网址，需要附加的请求头）。
 pub fn apply_auth(
@@ -284,6 +308,76 @@ pub fn reject_rerouting_headers(headers: &BTreeMap<String, String>) -> Result<()
     Ok(())
 }
 
+/// 跟随跳转后的最终响应。
+pub struct FinalResponse {
+    pub status: u16,
+    pub text: String,
+    pub session: Option<String>,
+}
+
+/// 手动跟随跳转（客户端设成不自动跳）：清单内的下一跳继续带凭据，
+/// 清单外照常跟过去但不再带凭据。这条是安全边界，所以不依赖 HTTP 客户端
+/// 自己在重定向时怎么处理凭据头——那种行为随版本变，不可审。
+pub async fn send_following(
+    client: &reqwest::Client,
+    card: &ServiceCard,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<FinalResponse> {
+    const MAX_REDIRECTS: usize = 5;
+    let mut current = url.to_string();
+    let mut carry = true;
+    let mut first = true;
+    for _ in 0..=MAX_REDIRECTS {
+        let (target, mut all) = if carry {
+            apply_auth(&current, card)?
+        } else {
+            (current.clone(), Vec::new())
+        };
+        if first {
+            // 首跳（也就是调用方给的目标）必须在允许清单内，协议也只能是 http/https。
+            check_target(&target, card)?;
+        }
+        all.extend(headers.iter().cloned());
+        let m = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
+            .map_err(|_| bad("请求方法不合法"))?;
+        let mut req = client.request(m, target.as_str());
+        for (k, v) in all {
+            req = req.header(k, v);
+        }
+        if let Some(b) = body {
+            req = req.body(b.to_string());
+        }
+        let resp = req.send().await.map_err(|_| internal("请求发送失败"))?;
+        let status = resp.status().as_u16();
+        let session = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let text = resp.text().await.map_err(|_| internal("响应读取失败"))?;
+        let Some(loc) = location.filter(|_| (300..400).contains(&status)) else {
+            return Ok(FinalResponse { status, text, session });
+        };
+        let base = reqwest::Url::parse(&target).map_err(|_| internal("跳转基准地址无法解析"))?;
+        let next = base.join(&loc).map_err(|_| internal("跳转地址无法解析"))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(bad("跳转目标不是 http/https"));
+        }
+        carry = host_allowed(next.host_str().unwrap_or(""), &card.addresses);
+        current = next.to_string();
+        first = false;
+    }
+    Err(internal("跳转次数超过上限"))
+}
+
 /// 执行一次通用 HTTP 请求：注入凭据、限制目标、抹掉响应里的凭据。
 pub async fn execute_http(
     card: &ServiceCard,
@@ -300,36 +394,24 @@ pub async fn execute_http(
     }
     reject_leaked_credential(&parts, &card.values())?;
 
+    // 首跳必须落在允许地址清单内；后续每跳是否继续带凭据由 send_following 判定。
     check_target(url, card)?;
-    let (final_url, auth_headers) = apply_auth(url, card)?;
-    // 注入后的目标也要校验：query 注入不会换主机，但仍走一遍以防拼接出错。
-    check_target(&final_url, card)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(card.timeout_secs()))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| internal("HTTP 客户端初始化失败"))?;
 
-    let m = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
-        .map_err(|_| bad("请求方法不合法"))?;
-    let mut req = client.request(m, final_url.as_str());
-    let mut all_headers: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    all_headers.extend(auth_headers);
-    for (k, v) in all_headers {
-        req = req.header(k, v);
-    }
-    if let Some(b) = body {
-        req = req.body(b);
-    }
-    let resp = req.send().await.map_err(|_| internal("请求发送失败"))?;
-    let status = resp.status().as_u16();
+    let request_headers: Vec<(String, String)> =
+        headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let resp = send_following(&client, card, method, url, &request_headers, body.as_deref()).await?;
+    let status = resp.status;
     // 已知缺口：reqwest 未启用流式特性，这里先把整个响应读进内存再截断，
     // 只能约束交给模型的体积，约束不了进程内存。后续给 reqwest 打开 stream
     // 特性后改成边读边截止。
-    let text = resp.text().await.map_err(|_| internal("响应读取失败"))?;
     // 先整体抹掉（跨边界的凭据也能完整替换），再按上限截断。
-    let scrubbed = scrub_all(&text, &card.values());
+    let scrubbed = scrub_all(&resp.text, &card.values());
     let body_text: String = scrubbed.chars().take(MAX_BODY).collect();
 
     Ok(json!({ "status": status, "body": body_text }))
@@ -355,41 +437,30 @@ async fn mcp_rpc(
     sid: Option<&str>,
     body: Value,
 ) -> Result<(Value, Option<String>)> {
-    let (url, headers) = apply_auth(target, card)?;
-    let mut req = client
-        .post(&url)
-        .header("Accept", "application/json, text/event-stream")
-        .header("Content-Type", "application/json")
-        .json(&body);
-    for (k, v) in headers {
-        req = req.header(k, v);
-    }
+    let mut headers = vec![
+        ("Accept".to_string(), "application/json, text/event-stream".to_string()),
+        ("Content-Type".to_string(), "application/json".to_string()),
+    ];
     if let Some(id) = sid {
-        req = req
-            .header("Mcp-Session-Id", id)
-            .header("MCP-Protocol-Version", "2024-11-05");
+        headers.push(("Mcp-Session-Id".to_string(), id.to_string()));
+        headers.push(("MCP-Protocol-Version".to_string(), "2024-11-05".to_string()));
     }
-    let resp = req.send().await.map_err(|_| internal("上游 MCP 传输失败"))?;
-    let status = resp.status();
-    let session = resp
-        .headers()
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    if !status.is_success() {
+    let payload = body.to_string();
+    let resp = send_following(client, card, "POST", target, &headers, Some(&payload)).await?;
+    let session = resp.session;
+    if !(200..300).contains(&resp.status) {
         // 上游的错误原文要带回来，否则没法判断是参数错还是上游错
-        let body = resp.text().await.unwrap_or_default();
-        let short: String = body.chars().take(300).collect();
+        let short: String = resp.text.chars().take(300).collect();
         return Err(internal(&format!(
             "上游 MCP HTTP {}：{}",
-            status.as_u16(),
+            resp.status,
             scrub_all(&short, &card.values())
         )));
     }
-    if status.as_u16() == 202 {
+    if resp.status == 202 {
         return Ok((Value::Null, session));
     }
-    let text = resp.text().await.map_err(|_| internal("上游响应不可读"))?;
+    let text = resp.text;
     if let Ok(v) = serde_json::from_str::<Value>(&text) {
         return Ok((v, session));
     }
@@ -428,6 +499,8 @@ pub async fn execute_mcp(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(card.timeout_secs()))
+        // 跳转交给 send_following 逐跳判定，客户端自己不跳
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| internal("HTTP 客户端初始化失败"))?;
 

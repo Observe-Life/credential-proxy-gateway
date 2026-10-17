@@ -10,7 +10,7 @@
 
 由SSH连接器演进，保留原数据卷、主机、PTY、SFTP和审计。凭据加密存储；智能体决定调用，程序在网络请求内注入凭据，不提供明文读取工具。
 
-## 新功能（开发分支，尚未部署验收）
+## 已部署能力（main 分支）
 - Exa远程MCP、豆包HTTP封装、微信公众号MCP、GitHub gh/git适配。
 - credential_registry/register/invoke/remove，编辑工具JSON和调用注意事项。
 - 顶部“允许智能体管理凭据”，30分钟服务端倒计时、关闭及重启失效。
@@ -41,15 +41,22 @@
 - `gateway_request(卡片, 方法, 地址, 请求头, 请求体)` —— 按卡片注入凭据后转发
 - `gateway_run(卡片, 命令, 工作目录, 超时)` —— 凭据作为环境变量注入子进程，输出里的凭据抹掉
 
+工具入参里凡是自由形态的字段都必须声明类型（对象或数组），不能留成无类型值：无类型字段在调用方构造参数时会退化成字符串，服务端取不到内容，智能体首次调用必然失败。`credential_invoke` 与 `gateway_call_mcp` 的子参数包、服务注册的工具列表都按此约束。
+
 不定义"每个服务一套工具"。服务接口多而用得少时，靠卡片里的"常用端点"提醒；智能体想用别的，自己按接口文档填即可。
 
-### 4. 几条硬规则
+### 4. 安全边界（唯一的硬性管理范围）
+
+只有这四条是强制的，其余一律只提醒、不强制：
 
 - 目标主机必须在卡片的允许地址里，否则拒绝
-- **跳转不禁**，但只往允许地址注入凭据；上游跳到清单外，照常跳过去但不带凭据
+- **跳转不禁**，最多跟随 5 跳：跳到清单内的下一跳继续带凭据，跳到清单外照常跟过去但不带凭据；跳转目标仍只允许 http/https
 - 智能体不得自带凭据明文，也不得自带可改道的请求头（`Host`、`Forwarded`、`X-Forwarded-*` 等）
 - 响应里的凭据一律抹掉，包括 base64 与百分号编码形态
-- 响应体截断，避免单个响应吃光上下文
+
+### 4b. 上下文保护（不是安全边界）
+
+响应体与目录列表都有体积上限，**超出会被标记，不静默丢弃**：`gateway_request` 上限 512 KiB；`sftp_list` 默认返回 200 条，`max_entries` 可调、上限 2000，`truncated=true` 时换更窄路径或用 `exec` 过滤，不要重复整目录拉取。这是保护模型上下文，不限制智能体拿到全部数据的能力。
 
 ### 5. 覆盖边界
 
@@ -69,11 +76,14 @@
 原ssh-connector-mcp_ssh-connector-data数据卷需保留。CREDENTIAL_VAULT_IMPORT_FILE支持一次性从私有文件迁移注册及凭据，加密写入后删除文件。
 GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无新增业务操作白名单；打印输出会遮蔽已知令牌。
 
-## 调用要求
-Exa query完整搜索描述，objective必填（要什么+排除什么），numResults默认10。
-豆包上游Query、SearchType=web、Count默认10；适配器补齐大写字段。
-微信调用wechat.wechat_search_v2_fetch_search，keyword必填，固定business_type=article sort=0。doc_url原文链接，desc摘要；date原秒级时间戳保留并加UTC+8 date_local；移除title/desc中的高亮em标签。
-GitHub gh_status/gh_run/gh_git，权限取决于令牌scope。
+## 调用要求（提醒，不是强制）
+
+下面这些是**提醒**。只有上游本身必填的参数会在缺少时提前拒绝（省一次必然失败的联网调用）；缺省值智能体可以覆盖，网关不再替它改写。
+
+- **Exa**：`query` 写完整描述；`objective` 上游必填（要什么 + 排除什么），缺少时提前拒绝；`numResults` 缺省 10。
+- **豆包**：`Query` 上游必填，缺少时提前拒绝；`SearchType` 缺省 `web`；`Count` 缺省 10，取值范围交给上游判断，**网关不再夹取**；大写字段自动补齐。
+- **微信**：`keyword` 上游必填；`business_type` 缺省 `article`、`sort` 缺省 `0`，**调用方给了就按调用方的来**，网关不再覆盖。`doc_url` 是原文链接，`desc` 是摘要；`date` 保留原秒级时间戳并附 UTC+8 的 `date_local`；`title`/`desc` 里的高亮 `em` 标签会被移除。
+- **GitHub**：`gh_status` / `gh_run` / `gh_git`，权限取决于令牌 scope。
 
 > 本仓库是 [LCYLYM/ssh-connector-mcp](https://github.com/LCYLYM/ssh-connector-mcp) 的分支，增加了容器化部署支持，改动见 [本仓库的改动](#本仓库的改动相对上游)。
 
@@ -251,7 +261,7 @@ AI MCP tools ── host_id only ──────┘
 
 Encrypted Vault: passwords/private keys
 Audit Log: local operation trail
-Network: 127.0.0.1 only
+Network: loopback by default; container deployment exposes the bridge on purpose
 ```
 
 安全属性：
@@ -552,7 +562,7 @@ keyboard-interactive、跳板成功和失败、最终目标错误分类、TOFU m
 
 ## 已知限制
 
-- HTTP server 刻意只监听 loopback，不实现远程鉴权。
+- HTTP server 默认只监听 loopback。容器化部署显式改绑定后，同一网桥内的调用不做身份鉴权——**这是设计目标**：让接入网桥的智能体容器可以直接使用全部工具，凭据保护靠加密存储与响应脱敏，不靠调用方身份。
 - `sftp_get` 面向文本文件；二进制文件会以 lossy UTF-8 返回，并设置 invalid UTF-8 标志。
 - host key 使用 TOFU 首次信任；尚未导入预置 known_hosts。
 - 进程崩溃或机器突然断电仍可能留下隐藏 `.part`/`.backup`；普通工具错误会自动清理，且不会发布半个目标文件。

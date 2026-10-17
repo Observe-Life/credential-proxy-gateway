@@ -10,11 +10,31 @@
 //!   agent on every call, while credential placement and wait conditions stay structured fields
 //!   executed by the program. Handing the credential to the model would break the confidentiality
 //!   promise; handing polling to the model would turn one call into dozens of round-trips.
-use crate::{state::AppState, error::{ConnectorError, ErrorCode, Result}};
+use crate::{audit::AuditLog, state::AppState, error::{ConnectorError, ErrorCode, Result}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use schemars::JsonSchema;
 use std::collections::HashMap;use std::sync::{Arc,OnceLock};use tokio::sync::{Mutex as AsyncMutex,Semaphore};
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ServiceTool {
+    pub name: String,
+    /// 参数示例。声明为对象，避免自由形态值在传输中被压成字符串；值本身仍不限制。
+    #[serde(default)] pub arguments: HashMap<String, Value>,
+}
+
+/// 宽容读取 tools：历史数据里它可能被写成 JSON 字符串（无类型字段的老问题），
+/// 解析不出来就当空，绝不让一条坏记录炸掉整个注册表。
+fn lenient_tools<'de, D>(d: D) -> std::result::Result<Vec<ServiceTool>, D::Error>
+where D: serde::Deserializer<'de> {
+    let raw = Value::deserialize(d)?;
+    if raw.is_null() { return Ok(vec![]); }
+    if let Ok(v) = serde_json::from_value::<Vec<ServiceTool>>(raw.clone()) { return Ok(v); }
+    if let Some(s) = raw.as_str() {
+        if let Ok(v) = serde_json::from_str::<Vec<ServiceTool>>(s) { return Ok(v); }
+    }
+    Ok(vec![])
+}
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ServiceRecord {
@@ -25,7 +45,7 @@ pub struct ServiceRecord {
     #[serde(default)] pub invocation_method: String,
     #[serde(default)] pub url: String,
     #[serde(default)] pub credential: String,
-    #[serde(default)] pub tools: Value,
+    #[serde(default, deserialize_with = "lenient_tools")] pub tools: Vec<ServiceTool>,
     #[serde(default)] pub notes: String,
 }
 impl ServiceRecord {
@@ -62,6 +82,10 @@ pub fn redact(text:&str, secret:&str)->String {
 }
 fn internal(message:&str)->ConnectorError {ConnectorError::internal(message)}
 fn http_client()->Result<reqwest::Client>{reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).redirect(reqwest::redirect::Policy::none()).build().map_err(|_|internal("HTTP client initialization failed"))}
+/// 读取数字参数：按数字取；传输过程把它变成字符串时也照用，不因此拒绝调用。
+fn number_arg(args:&Value,key:&str)->Option<u64>{
+    args.get(key).and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok())))
+}
 async fn upstream_rpc(client:&reqwest::Client,url:&str,key:&str,sid:Option<&str>,body:Value)->Result<(Value,Option<String>)> {
     let mut req=client.post(url).header("Accept","application/json, text/event-stream").json(&body);
     if !key.is_empty(){req=req.header("Authorization",key)}
@@ -95,17 +119,33 @@ async fn native_call(s:&ServiceRecord,tool:&str,args:Value)->Result<Value>{
 fn clean_highlight(s:&str)->String{s.replace("<em class=\"highlight\">","").replace("</em>","")}
 fn clean_wechat(v:&mut Value){match v {Value::Array(a)=>for x in a{clean_wechat(x)},Value::Object(o)=>{for(k,x)in o.iter_mut(){if ["title","desc"].contains(&k.as_str()){if let Some(s)=x.as_str(){*x=Value::String(clean_highlight(s))}}else{clean_wechat(x)}}if let Some(timestamp)=o.get("date").and_then(Value::as_i64){if let Ok(t)=time::OffsetDateTime::from_unix_timestamp(timestamp){let t=t.to_offset(time::UtcOffset::from_hms(8,0,0).unwrap());o.insert("date_local".into(),Value::String(format!("{}",t)));}}},_=>{}}}
 
-pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,mut args:Value)->Result<Value>{
+/// 调用入口：负责审计（成功与失败都留痕），实际派发交给 invoke_record。
+pub async fn invoke(st:Arc<AppState>,id:&str,tool:&str,args:Value)->Result<Value>{
     let record=st.vault.get_service_record(id)?;
+    let preview=audit_preview(&args.to_string(),&record.credential);
+    match invoke_record(&record,tool,args).await{
+        Ok(value)=>{
+            st.audit.record(AuditLog::entry("credential_invoke").with_detail(json!({"service":id,"tool":tool,"args":preview})));
+            Ok(value)
+        }
+        Err(e)=>{
+            st.audit.record(AuditLog::entry("credential_invoke_failed").with_detail(json!({"service":id,"tool":tool,"args":preview,"code":e.code.as_str(),"message":audit_preview(&e.message,&record.credential)})));
+            Err(e)
+        }
+    }
+}
+async fn invoke_record(record:&ServiceRecord,tool:&str,mut args:Value)->Result<Value>{
     let result=match record.adapter.as_str(){
-        "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"Query required"))}let body=json!({"Query":q,"SearchType":"web","Count":args.get("Count").or_else(||args.get("count")).and_then(Value::as_u64).unwrap_or(10).clamp(1,50),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
-        "wechat"=>{if let Some(o)=args.as_object_mut(){o.insert("business_type".into(),json!("article"));o.insert("sort".into(),json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
+        "doubao"=>{let q=args.get("Query").or_else(||args.get("query")).and_then(Value::as_str).unwrap_or("");if q.is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"Query required"))}let body=json!({"Query":q,"SearchType":"web","Count":number_arg(&args,"Count").or_else(||number_arg(&args,"count")).unwrap_or(10),"NeedSummary":args.get("need_summary").and_then(Value::as_bool).unwrap_or(true)});let r=http_client()?.post(&record.url).header("Authorization",&record.credential).json(&body).send().await.map_err(|_|internal("search transport failed"))?;if !r.status().is_success(){return Err(internal(&format!("search HTTP {}",r.status().as_u16())))}r.json::<Value>().await.map_err(|_|internal("search result is not JSON"))?},
+        "wechat"=>{if let Some(o)=args.as_object_mut(){o.entry("business_type".into()).or_insert(json!("article"));o.entry("sort".into()).or_insert(json!("0"));}let mut result=native_call(&record,"wechat_search_v2_fetch_search",args).await?;if let Some(content)=result.get_mut("content").and_then(Value::as_array_mut){for item in content{if let Some(raw)=item.get("text").and_then(Value::as_str){if let Ok(mut parsed)=serde_json::from_str::<Value>(raw){clean_wechat(&mut parsed);item["text"]=json!(parsed.to_string());}}}}result},
         "exa"=>{if args.get("objective").and_then(Value::as_str).unwrap_or("").trim().is_empty(){return Err(ConnectorError::new(ErrorCode::BadRequest,"objective required"))}native_call(&record,tool,args).await?},
         "github"=>github_call(&record,tool,args).await?,
         _=>return Err(internal("adapter not supported")),
     };
     let text=redact(&result.to_string(),&record.credential);serde_json::from_str(&text).map_err(|_|internal("result normalization failed"))
 }
+/// 审计摘要：先抹掉凭据再限长，只留复盘够用的信息，绝不写入密钥本身。
+fn audit_preview(text:&str,secret:&str)->String{redact(text,secret).chars().take(240).collect()}
 /// GitHub 子进程的全局限流闸门。上限可用 GITHUB_MAX_CONCURRENCY 覆盖（1..=64，默认 4）。
 /// 没有它时，一口气来 10 个调用就会同时起 10 个进程，容易把 CPU/内存打满。
 fn github_gate()->&'static Semaphore{
