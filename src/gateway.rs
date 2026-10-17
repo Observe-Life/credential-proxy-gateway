@@ -756,7 +756,10 @@ mod tests {
 
     #[test]
     fn target_check_blocks_foreign_host_and_bad_scheme() {
-        let c = card();
+        // 这里直接构造两张主机的卡片来验证匹配逻辑本身，不经过卡片校验。
+        // 现实里"接口域名 + 下载域名"要拆成两张卡（下载那张用不注入）。
+        let mut c = card();
+        c.addresses.push("*.aliyuncs.com".into());
         assert!(check_target("https://mineru.net/api/v4/x", &c).is_ok());
         assert!(check_target("https://oss.aliyuncs.com/a.zip", &c).is_ok());
         assert!(check_target("https://evil.com/steal", &c).is_err());
