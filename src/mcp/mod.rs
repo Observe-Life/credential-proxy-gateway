@@ -478,7 +478,8 @@ pub struct ServiceId { pub id: String }
 pub struct GatewayRequest {
     pub card_id: String,
     pub method: String,
-    pub url: String,
+    /// 完整网址。留空则用卡片里登记的"服务方网址"。
+    #[serde(default)] pub url: String,
     #[serde(default)] pub headers: std::collections::BTreeMap<String, String>,
     #[serde(default)] pub body: Option<String>,
 }
@@ -533,10 +534,11 @@ impl McpServer {
     #[tool(description = "按服务卡片发一次 HTTP 请求。方法、完整网址、请求头和请求体都由你决定；程序按卡片校验目标主机、按卡片的注入方式附加凭据，再把响应里出现的凭据抹掉，所以你看不到凭据的值。目标主机必须在该卡片的 addresses 里，否则直接拒绝。不要自带 Host、Forwarded、X-Forwarded-* 这类会改道请求的头，也不要试图把凭据值写进请求，两者都会被拒。跳转允许，但跳到卡片地址之外的地址时不会带凭据。")]
     async fn gateway_request(&self, Parameters(req): Parameters<GatewayRequest>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
-        let outcome = crate::gateway::execute_http(&card, &req.method, &req.url, req.headers, req.body).await;
+        let url = match resolve_url(&card, &req.url) { Ok(u) => u, Err(e) => return Err(e) };
+        let outcome = crate::gateway::execute_http(&card, &req.method, &url, req.headers, req.body).await;
         match &outcome {
-            Ok(v) => audit_call(&self.state, "gateway_request", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":req.url,"status":v.get("status")})),
-            Err(e) => audit_call(&self.state, "gateway_request_failed", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":req.url,"code":e.code.as_str(),"message":e.message})),
+            Ok(v) => audit_call(&self.state, "gateway_request", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":url,"status":v.get("status")})),
+            Err(e) => audit_call(&self.state, "gateway_request_failed", &card, serde_json::json!({"card":req.card_id,"method":req.method,"url":url,"code":e.code.as_str(),"message":e.message})),
         }
         let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
