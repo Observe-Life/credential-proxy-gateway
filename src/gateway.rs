@@ -351,10 +351,11 @@ fn primary_value(card: &ServiceCard) -> String {
 async fn mcp_rpc(
     client: &reqwest::Client,
     card: &ServiceCard,
+    target: &str,
     sid: Option<&str>,
     body: Value,
 ) -> Result<(Value, Option<String>)> {
-    let (url, headers) = apply_auth(&card.url, card)?;
+    let (url, headers) = apply_auth(target, card)?;
     let mut req = client
         .post(&url)
         .header("Accept", "application/json, text/event-stream")
@@ -409,15 +410,21 @@ async fn mcp_rpc(
 }
 
 /// 按 MCP 协议调用一次远程工具：握手 → 通知就绪 → 调用 → 结束会话。
-pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) -> Result<Value> {
-    if card.url.trim().is_empty() {
-        return Err(bad("这张卡片没填入口地址"));
-    }
+/// 目标网址每次由模型给出（与 execute_http 一致）：卡片只负责“允许去哪 + 凭据怎么带”。
+pub async fn execute_mcp(
+    card: &ServiceCard,
+    target: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<Value> {
     if tool_name.trim().is_empty() {
         return Err(bad("MCP 调用必须给 tool_name"));
     }
-    reject_leaked_credential(&[tool_name.to_string(), arguments.to_string()], &card.values())?;
-    check_target(&card.url, card)?;
+    reject_leaked_credential(
+        &[target.to_string(), tool_name.to_string(), arguments.to_string()],
+        &card.values(),
+    )?;
+    check_target(target, card)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(card.timeout_secs()))
@@ -427,6 +434,7 @@ pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) 
     let (init, sid) = mcp_rpc(
         &client,
         card,
+        target,
         None,
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":"2024-11-05","capabilities":{},
@@ -439,6 +447,7 @@ pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) 
     let _ = mcp_rpc(
         &client,
         card,
+        target,
         sid.as_deref(),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     )
@@ -446,6 +455,7 @@ pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) 
     let (value, _) = mcp_rpc(
         &client,
         card,
+        target,
         sid.as_deref(),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
                "params":{"name":tool_name,"arguments":arguments}}),
@@ -453,7 +463,7 @@ pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) 
     .await?;
     if let Some(id) = &sid {
         let _ = client
-            .delete(&card.url)
+            .delete(target)
             .header("Mcp-Session-Id", id)
             .send()
             .await;

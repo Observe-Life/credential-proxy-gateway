@@ -406,7 +406,6 @@ impl Vault {
             let card = crate::gateway::ServiceCard {
                 id: rec.id.clone(),
                 name: rec.name.clone(),
-                url: rec.url.clone(),
                 addresses: if host.is_empty() { vec![] } else { vec![host] },
                 credentials,
                 auth: auth.to_string(),
