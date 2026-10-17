@@ -67,7 +67,7 @@
 所有容器加入backend；内部地址credential-proxy-gateway:7600。网页入口由container-login-gateway的/vault/反代。
 保险箱环境CREDENTIAL_VAULT_GATEWAY_AUTH_FILE与网关INTERNAL_AUTH_TOKEN_FILE指向相同服务间密钥文件，绝不写入仓库。
 原ssh-connector-mcp_ssh-connector-data数据卷需保留。CREDENTIAL_VAULT_IMPORT_FILE支持一次性从私有文件迁移注册及凭据，加密写入后删除文件。
-GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无新增业务操作白名单；打印输出会遮蔽已知令牌，不能承诺任意执行能力下不可提取密钥。
+GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无新增业务操作白名单；打印输出会遮蔽已知令牌。
 
 ## 调用要求
 Exa query完整搜索描述，objective必填（要什么+排除什么），numResults默认10。
@@ -75,8 +75,6 @@ Exa query完整搜索描述，objective必填（要什么+排除什么），numR
 微信调用wechat.wechat_search_v2_fetch_search，keyword必填，固定business_type=article sort=0。doc_url原文链接，desc摘要；date原秒级时间戳保留并加UTC+8 date_local；移除title/desc中的高亮em标签。
 GitHub gh_status/gh_run/gh_git，权限取决于令牌scope。
 
-> **English:** [README.en.md](README.en.md)
->
 > 本仓库是 [LCYLYM/ssh-connector-mcp](https://github.com/LCYLYM/ssh-connector-mcp) 的分支，增加了容器化部署支持，改动见 [本仓库的改动](#本仓库的改动相对上游)。
 
 **面向 Codex、Claude Code、OpenClaw 和任意 MCP 客户端的 AI 安全 SSH 连接器。**
