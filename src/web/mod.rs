@@ -135,7 +135,9 @@ async fn verify_gateway_identity(State(st): State<Shared>, req: Request, next: N
     let identity = client.get("http://container-login-gateway:8080/internal/session/verify")
         .header("X-Internal-Auth", secret.trim()).header("Cookie", cookie).send().await;
     if !identity.is_ok_and(|r|r.status().is_success()) {
-        st.vault.lock_management();
+        // 未登录只拒绝这一个请求，不改动管理授权状态。
+        // 网页会话过期、或其他容器做一次只读探测，都不该把人正开着的管理开关
+        // 顺手关掉；收回授权只有两条路：30 分钟自然到期，和显式关闭（两者都留审计）。
         return (StatusCode::UNAUTHORIZED, "请先通过容器统一登录网关登录").into_response();
     }
     if req.method()!=axum::http::Method::GET && req.method()!=axum::http::Method::HEAD {
@@ -151,6 +153,9 @@ async fn verify_gateway_identity(State(st): State<Shared>, req: Request, next: N
 struct GrantRequest { enabled: bool }
 async fn management_grant(State(st): State<Shared>, Json(req): Json<GrantRequest>) -> ApiResult {
     if req.enabled {st.vault.open_management_grant().map_err(ApiError::from)?;} else {st.vault.lock_management();}
+    // 管理授权是"凭据可被写入"的开关，每次开与关都必须查得到。
+    st.audit.record(crate::audit::AuditLog::entry(if req.enabled { "management_grant_open" } else { "management_grant_close" })
+        .with_detail(json!({ "remaining_seconds": st.vault.management_remaining_seconds() })));
     Ok(Json(json!({"enabled":st.vault.is_management_unlocked(),"remaining_seconds":st.vault.management_remaining_seconds()})))
 }
 // 服务卡片：列表只返回元数据，凭据只说明配了哪几个字段，绝不返回值。

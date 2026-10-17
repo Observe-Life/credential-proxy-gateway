@@ -49,9 +49,14 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     if let Ok(file) = std::env::var("CREDENTIAL_VAULT_IMPORT_FILE") {
         if std::path::Path::new(&file).exists() {
             let records: Vec<crate::services::ServiceRecord> = serde_json::from_slice(&std::fs::read(&file)?)?;
+            let import_count = records.len();
             vault.open_management_grant()?;
+            audit.record(AuditLog::entry("management_grant_open").with_detail(serde_json::json!({ "reason": "import_file" })));
             for record in records { vault.put_service_record(record)?; }
             vault.lock_management();
+            audit.record(AuditLog::entry("management_grant_close").with_detail(serde_json::json!({ "reason": "import_file" })));
+            // 一次性迁移会写入凭据记录，属于必须可追溯的动作
+            audit.record(AuditLog::entry("service_migrate_import").with_detail(serde_json::json!({ "count": import_count })));
             std::fs::remove_file(&file)?;
             tracing::info!("MCP credential migration completed; import file removed");
         }
