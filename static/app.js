@@ -1102,6 +1102,7 @@ function openEditor(item,trigger){
   const f=$('registry-form');f.reset();editorTrigger=trigger;
   f.elements.id.value=item?.id||'';f.elements.id.readOnly=!!item;
   f.elements.name.value=item?.name||'';
+  f.elements.url.value=item?.url||'';
   f.elements.addresses.value=(item?.addresses||[]).join('\n');
   const a=item?.auth||'bearer';
   f.elements.auth.value=a.startsWith('query:')?'query':a;
@@ -1157,6 +1158,7 @@ $('registry-form').addEventListener('submit',async e=>{
   try{
     const a=f.elements.auth.value;
     const card={id:f.elements.id.value.trim(),name:f.elements.name.value.trim(),
+      url:f.elements.url.value.trim(),
       addresses:splitLines(f.elements.addresses.value),
       credentials:{},auth:a==='query'?('query:'+f.elements.query_param.value.trim()):a,
       header_name:f.elements.header_name.value.trim(),

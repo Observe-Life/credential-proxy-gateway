@@ -448,6 +448,15 @@ pub struct GatewayRequest {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GatewayCallMcp {
+    pub card_id: String,
+    pub tool_name: String,
+    #[serde(default)] pub arguments: Value,
+    /// 可选：不填则用卡片里登记的入口地址
+    #[serde(default)] pub url: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct GatewayRun {
     pub card_id: String,
     pub command: String,
@@ -505,6 +514,14 @@ impl McpServer {
     async fn gateway_request(&self, Parameters(req): Parameters<GatewayRequest>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
         let out = crate::gateway::execute_http(&card, &req.method, &req.url, req.headers, req.body).await.map_err(err_to_mcp)?;
+        Ok(Json(CredentialResponse { result: out }))
+    }
+
+    #[tool(description = "按 MCP 协议调用一次远程服务（exa、微信公众号这类）。程序先握手再调用你指定的 tool_name：tool_name 是该服务提供的工具名，arguments 是它的参数。card_id 指卡片（地址与凭据都按卡片来），url 可留空表示用卡片登记的入口地址。程序附加凭据，并把返回里出现的凭据抹掉。")]
+    async fn gateway_call_mcp(&self, Parameters(req): Parameters<GatewayCallMcp>) -> Result<Json<CredentialResponse>, ErrorData> {
+        let mut card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
+        if let Some(u) = req.url { if !u.trim().is_empty() { card.url = u; } }
+        let out = crate::gateway::execute_mcp(&card, &req.tool_name, req.arguments).await.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))
     }
 

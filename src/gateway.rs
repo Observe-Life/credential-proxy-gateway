@@ -1,5 +1,12 @@
 //! 服务卡片与通用凭据注入。凭据只注入外发请求，永不进入模型上下文。
 //!
+//! 卡片只有一套字段（名称、允许的地址、入口地址、凭据、注入方式、常用端点、注意事项），
+//! 不区分服务类型。怎么把请求发出去，由模型每次自己挑工具：
+//! - `execute_http`    ：普通 HTTP/HTTPS 请求，方法/路径/参数/请求体都由模型决定
+//! - `execute_mcp`     ：按 MCP 协议对话（握手后调用指定工具），给 exa、微信公众号这类服务用
+//! - `execute_command` ：本地命令，凭据作为环境变量注入子进程
+//! 三者共用同一套地址校验、凭据注入与结果脱敏。
+//!
 //! 设计（见 README「服务适配机制设计」）：
 //! - 每个服务一张卡片：名称、允许的地址、凭据（键值对）、注入方式，这四项是机制；
 //!   可用端点与调用注意事项只是给智能体的建议，不约束它。
@@ -111,9 +118,7 @@ impl ServiceCard {
         {
             return Err(bad("卡片编号只能用字母、数字、下划线或短横线，且不超过 64 字符"));
         }
-        if self.addresses.is_empty() {
-            return Err(bad("必须至少填一个允许的地址，否则凭据无处可去"));
-        }
+        // 允许为空：本地命令类不需要地址。为空时任何 HTTP 目标都会被拒，是安全方向。
         for a in &self.addresses {
             if a.trim().is_empty() || a.contains('/') || a.contains(' ') {
                 return Err(bad("允许的地址只填主机名，例如 api.example.com 或 *.example.com"));
@@ -235,13 +240,7 @@ pub fn apply_auth(
     card: &ServiceCard,
 ) -> Result<(String, Vec<(String, String)>)> {
     let mut headers: Vec<(String, String)> = Vec::new();
-    // 单字段卡片用第一个字段的值；多字段卡片按 `auth` 指定，缺省取第一个。
-    let value = card
-        .credentials
-        .values()
-        .next()
-        .cloned()
-        .unwrap_or_default();
+    let value = primary_value(card);
     if card.auth == "none" {
         return Ok((url.to_string(), headers));
     }
@@ -334,6 +333,146 @@ pub async fn execute_http(
     let body_text: String = scrubbed.chars().take(MAX_BODY).collect();
 
     Ok(json!({ "status": status, "body": body_text }))
+}
+
+/// 取卡片的主凭据值：`query:`/`env:` 指定了字段名就取那个，否则取第一个。
+fn primary_value(card: &ServiceCard) -> String {
+    for prefix in ["query:", "env:"] {
+        if let Some(name) = card.auth.strip_prefix(prefix) {
+            if let Some(v) = card.credentials.get(name) {
+                return v.clone();
+            }
+        }
+    }
+    card.credentials.values().next().cloned().unwrap_or_default()
+}
+
+/// 一次 MCP 往返。凭据按卡片配置注入，响应里的凭据抹掉。
+async fn mcp_rpc(
+    client: &reqwest::Client,
+    card: &ServiceCard,
+    sid: Option<&str>,
+    body: Value,
+) -> Result<(Value, Option<String>)> {
+    let (url, headers) = apply_auth(&card.url, card)?;
+    let mut req = client
+        .post(&url)
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .json(&body);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    if let Some(id) = sid {
+        req = req
+            .header("Mcp-Session-Id", id)
+            .header("MCP-Protocol-Version", "2024-11-05");
+    }
+    let resp = req.send().await.map_err(|_| internal("上游 MCP 传输失败"))?;
+    let status = resp.status();
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if !status.is_success() {
+        // 上游的错误原文要带回来，否则没法判断是参数错还是上游错
+        let body = resp.text().await.unwrap_or_default();
+        let short: String = body.chars().take(300).collect();
+        return Err(internal(&format!(
+            "上游 MCP HTTP {}：{}",
+            status.as_u16(),
+            scrub_all(&short, &card.values())
+        )));
+    }
+    if status.as_u16() == 202 {
+        return Ok((Value::Null, session));
+    }
+    let text = resp.text().await.map_err(|_| internal("上游响应不可读"))?;
+    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+        return Ok((v, session));
+    }
+    for event in text.replace("\r\n", "\n").split("\n\n") {
+        let data = event
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Ok(v) = serde_json::from_str::<Value>(&data) {
+            if v.get("id").is_some() {
+                return Ok((v, session));
+            }
+        }
+    }
+    Err(internal("上游 MCP 响应格式无法识别"))
+}
+
+/// 按 MCP 协议调用一次远程工具：握手 → 通知就绪 → 调用 → 结束会话。
+pub async fn execute_mcp(card: &ServiceCard, tool_name: &str, arguments: Value) -> Result<Value> {
+    if card.url.trim().is_empty() {
+        return Err(bad("这张卡片没填入口地址"));
+    }
+    if tool_name.trim().is_empty() {
+        return Err(bad("MCP 调用必须给 tool_name"));
+    }
+    reject_leaked_credential(&[tool_name.to_string(), arguments.to_string()], &card.values())?;
+    check_target(&card.url, card)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(card.timeout_secs()))
+        .build()
+        .map_err(|_| internal("HTTP 客户端初始化失败"))?;
+
+    let (init, sid) = mcp_rpc(
+        &client,
+        card,
+        None,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2024-11-05","capabilities":{},
+            "clientInfo":{"name":"credential-proxy-gateway","version":"0.1.0"}}}),
+    )
+    .await?;
+    if init.get("error").is_some() {
+        return Err(internal("上游 MCP 拒绝了初始化"));
+    }
+    let _ = mcp_rpc(
+        &client,
+        card,
+        sid.as_deref(),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
+    let (value, _) = mcp_rpc(
+        &client,
+        card,
+        sid.as_deref(),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+               "params":{"name":tool_name,"arguments":arguments}}),
+    )
+    .await?;
+    if let Some(id) = &sid {
+        let _ = client
+            .delete(&card.url)
+            .header("Mcp-Session-Id", id)
+            .send()
+            .await;
+    }
+    if value.get("error").is_some() {
+        return Err(internal(&format!(
+            "上游 MCP 拒绝了这次调用：{}",
+            scrub_all(&value["error"].to_string(), &card.values())
+        )));
+    }
+    let result = value.get("result").cloned().unwrap_or(Value::Null);
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(internal(&format!(
+            "上游 MCP 返回错误：{}",
+            scrub_all(&result.to_string(), &card.values())
+        )));
+    }
+    let scrubbed = scrub_all(&result.to_string(), &card.values());
+    serde_json::from_str(&scrubbed).map_err(|_| internal("结果整理失败"))
 }
 
 /// 执行一次本地命令：凭据作为环境变量注入子进程，输出里的凭据抹掉。
@@ -466,6 +605,21 @@ mod tests {
         c.auth = "header".into();
         c.header_name = String::new();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn primary_value_follows_auth_target() {
+        let mut c = card();
+        c.credentials = BTreeMap::from([
+            ("APPKEY".to_string(), "aaa".to_string()),
+            ("SECRET".to_string(), "sss".to_string()),
+        ]);
+        c.auth = "query:SECRET".to_string();
+        assert_eq!(primary_value(&c), "sss");
+        c.auth = "env:APPKEY".to_string();
+        assert_eq!(primary_value(&c), "aaa");
+        c.auth = "header".to_string();
+        assert_eq!(primary_value(&c), "aaa", "未指定时取第一个");
     }
 
     #[test]

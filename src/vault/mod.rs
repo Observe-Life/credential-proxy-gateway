@@ -368,6 +368,61 @@ impl Vault {
         Ok(())
     }
 
+    /// 卡片写入的内部通道：迁移时用，绕过管理开关。
+    fn put_card_internal(&self, card: &crate::gateway::ServiceCard) -> Result<()> {
+        self.card_table()?;
+        let bytes = serde_json::to_vec(card).map_err(|_| ConnectorError::internal("card serialization failed"))?;
+        let sealed = self.with_dek(|dek| seal(dek, &bytes))?;
+        self.lock_conn().execute("INSERT INTO gateway_cards (id,sealed) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed", rusqlite::params![card.id, sealed])?;
+        Ok(())
+    }
+
+    /// 把旧的 mcp_services 记录迁移成服务卡片。
+    /// 幂等：卡片表非空时直接返回 0，不会覆盖已有卡片。
+    /// 映射：exa→凭据作网址参数 exaApiKey；wechat/doubao→Authorization 头；github→环境变量 GH_TOKEN。
+    pub fn migrate_legacy_services(&self) -> Result<usize> {
+        self.card_table()?;
+        let existing: i64 = self.lock_conn().query_row("SELECT COUNT(*) FROM gateway_cards", [], |r| r.get(0))?;
+        if existing > 0 { return Ok(0); }
+        self.service_table()?;
+        let ids: Vec<String> = {
+            let conn = self.lock_conn();
+            let mut stmt = conn.prepare("SELECT id FROM mcp_services ORDER BY id")?;
+            stmt.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut n = 0;
+        for id in ids {
+            let rec = match self.get_service_record(&id) { Ok(r) => r, Err(_) => continue };
+            let host = reqwest::Url::parse(&rec.url).ok()
+                .and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
+            let (auth, header_name, key) = match rec.adapter.as_str() {
+                "exa" => ("query:exaApiKey", "", "EXA_API_KEY"),
+                "wechat" => ("header", "Authorization", "WECHAT_TOKEN"),
+                "doubao" => ("header", "Authorization", "DOUBAO_KEY"),
+                _ => ("none", "", "GH_TOKEN"),
+            };
+            let mut credentials = std::collections::BTreeMap::new();
+            if !rec.credential.is_empty() { credentials.insert(key.to_string(), rec.credential.clone()); }
+            let card = crate::gateway::ServiceCard {
+                id: rec.id.clone(),
+                name: rec.name.clone(),
+                url: rec.url.clone(),
+                addresses: if host.is_empty() { vec![] } else { vec![host] },
+                credentials,
+                auth: auth.to_string(),
+                header_name: header_name.to_string(),
+                endpoints: vec![],
+                notes: rec.notes.clone(),
+                timeout: None,
+            };
+            if card.validate().is_ok() {
+                self.put_card_internal(&card)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// Run a closure with the live DEK, or fail if locked.
     fn with_dek<T>(&self, f: impl FnOnce(&[u8; 32]) -> Result<T>) -> Result<T> {
         let guard = self.unlocked.lock().unwrap_or_else(|p| p.into_inner());
