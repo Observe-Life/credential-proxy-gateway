@@ -10,13 +10,18 @@
 
 由SSH连接器演进，保留原数据卷、主机、PTY、SFTP和审计。凭据加密存储；智能体决定调用，程序在网络请求内注入凭据，不提供明文读取工具。
 
-## 已部署能力（main 分支）
-- Exa远程MCP、豆包HTTP封装、微信公众号MCP、GitHub gh/git适配。
-- credential_registry/register/invoke/remove，编辑工具JSON和调用注意事项。
-- 顶部“允许智能体管理凭据”，30分钟服务端倒计时、关闭及重启失效。
-- /vault/管理页共享统一网页登录，不再次要求主密码；内部请求单独核验登录Cookie和服务间密钥。
-- Server酱成功/失败构建通知，地址仅Actions Secret。
+## 当前能力（main 分支，已构建已部署）
 
+- **服务卡片机制**：一张卡片对应一个服务（允许的地址、凭据键值对、注入方式是机制；常用端点与注意事项是提醒）。三条执行路径——通用 HTTP 请求、按 MCP 协议调用远程服务、本地命令（凭据走环境变量）。**新增服务只需加卡片，不改代码。**
+- **已接入四个服务**：Exa 搜索、豆包搜索（国内版）、微信公众号文章、GitHub（`gh` / `git` 完整命令能力）。
+- **设备与终端**（承自 SSH 连接器）：设备登记与连接、一次性命令（三种载荷）、持久交互终端、二进制安全的文件传输与 SHA-256 校验。
+- **凭据边界**：凭据加密存储；智能体侧只写不可读；外发请求由程序注入凭据；响应与命令输出里出现的凭据一律抹掉，含 base64 与百分号编码形态。
+- **管理授权**：写入与删除凭据需人在网页打开 30 分钟临时开关；每次开与关都留审计。
+- **审计**：SSH 面与服务调用面全覆盖，**失败的越界尝试同样留痕**。
+- **上下文保护**：响应体有上限；目录列表默认 200 条并返回 `total` / `truncated`，不静默丢弃。
+- 构建完成通过 Server酱 通知，地址只存放在 Actions Secret。
+
+> 开发分支时代的"待部署"内容已全部上线；本节只描述线上实际状态。
 ## 服务适配机制设计
 
 ### 1. 一张卡片 = 一个服务
@@ -71,11 +76,24 @@
 参考实现对照（代码级）：`mvplab-ai/agent-vault` 的 `auth_style` 与编码形态脱敏、响应上限与边界读取、拒绝改道请求头；`AliProgrammin/agentic-vault` 的按值长度从长到短替换。
 
 ## 部署
-所有容器加入backend；内部地址credential-proxy-gateway:7600。网页入口由container-login-gateway的/vault/反代。
-保险箱环境CREDENTIAL_VAULT_GATEWAY_AUTH_FILE与网关INTERNAL_AUTH_TOKEN_FILE指向相同服务间密钥文件，绝不写入仓库。
-原ssh-connector-mcp_ssh-connector-data数据卷需保留。CREDENTIAL_VAULT_IMPORT_FILE支持一次性从私有文件迁移注册及凭据，加密写入后删除文件。
-GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无新增业务操作白名单；打印输出会遮蔽已知令牌。
 
+镜像 `ghcr.io/observe-life/credential-proxy-gateway`，标签有 `latest` 与 `sha-<短哈希>`；用短哈希标签部署便于回滚。
+
+所有容器加入外部网桥 `backend`；服务地址 `credential-proxy-gateway:7600`，**端口不发布到宿主机**。管理网页由 `container-login-gateway` 以 `/vault/` 反代。
+
+关键环境变量：
+
+| 变量 | 作用 |
+| --- | --- |
+| `SSH_CONNECTOR_BIND_ADDRESS` | 容器内需设为 `0.0.0.0` 才能被同网桥访问；默认仍是 `127.0.0.1` |
+| `SSH_CONNECTOR_ALLOWED_HOSTS` | MCP 允许的 `Host` 头，追加到库自带的回环白名单之后 |
+| `CREDENTIAL_VAULT_GATEWAY_AUTH_FILE` | 服务间密钥文件，与登录网关的 `INTERNAL_AUTH_TOKEN_FILE` 指向同一份，**绝不写入仓库** |
+| `CREDENTIAL_VAULT_IMPORT_FILE` | 一次性从私有文件迁移注册与凭据，加密写入后删除该文件 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 出站代理与免代理清单，**必须与卡片允许的地址一起维护** |
+| `GITHUB_MAX_CONCURRENCY` | GitHub 命令并发上限，默认 4，允许 1～64 |
+| `SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES` | MCP 会话空闲回收，默认 120 分钟，允许 5～1440 |
+
+数据：整个 `/app/data` 数据卷都要备份，不能只备份 `vault.db`——还需 `runtime-key` 与 `audit/`。GitHub 命令的持久工作目录是 `/app/data/github`，`gh` / `git` 使用完整命令能力、没有业务操作白名单，输出会遮蔽已知令牌。
 ## 调用要求（提醒，不是强制）
 
 下面这些是**提醒**。只有上游本身必填的参数会在缺少时提前拒绝（省一次必然失败的联网调用）；缺省值智能体可以覆盖，网关不再替它改写。
@@ -113,181 +131,107 @@ GitHub持久工作目录/app/data/github，使用gh/git完整命令能力，无�
 
 ## 特性
 
-- **AI 安全凭据边界**：密码和私钥用主密码加密落盘；MCP 工具永不返回存储的明文凭据。
-- **仅监听本机**：Web UI 和 Streamable HTTP MCP 都绑定 `127.0.0.1`。
-- **安全短命令**：`exec` 支持自动 POSIX 转义的 `argv`、多行 `script`，以及明确自负 shell quoting 的 `raw`。
-- **持久交互会话**：可打开 PTY、发送文本/按键、读取结构化屏幕、调整尺寸和关闭。
-- **二进制安全 SFTP**：文本/base64 小文件工具，加上不会把文件字节塞进模型上下文的有界分块路径传输。
-- **目标文件安全提交**：支持父目录创建、默认禁止覆盖、同目录临时文件、覆盖回滚、失败清理、大小检查和本地/远端本机 SHA-256 验证。
-- **连接生命周期**：SSH transport 会复用；一次性操作按需连接；删除主机会断开对应 live connection。
-- **跳板和多认证方式**：支持密码、带可选 passphrase 的私钥、keyboard-interactive，以及每跳独立认证的跳板链。
-- **审计日志**：vault、主机、exec、PTY 和 SFTP 操作都写入本地审计记录。
-- **适合 MacBook 常驻**：空闲 daemon 很轻量，不创建阻止系统睡眠的电源断言。
+- **智能体不接触密钥**：密码与私钥用主密码加密落盘，MCP 工具永不返回存储的明文凭据；查看明文只走人工网页路径。
+- **服务调用不写代码**：网关只做"按地址查凭据、注入、抹掉响应里的凭据"三件事，方法、路径、参数、请求体由智能体自己决定。
+- **安全边界是硬性的，其余是提醒性的**：目标主机必须在卡片允许清单内；智能体不得自带凭据明文，也不得自带可改道的请求头；跳转允许，但跳到清单外不再带凭据。
+- **强制跳转策略可控**：HTTP 客户端不自动跳转，由网关逐跳判定并限制最多 5 跳，跳转目标仍只允许 http/https。
+- **仅内部网桥可见**：端口不发布到宿主机，局域网访问不到；管理网页经统一登录网关反代。
+- **连接生命周期自管**：SSH 传输复用，一次性操作按需连接，断线后可自动重连；每台设备限并发通道数。
+- **审计可追溯**：设备、终端、文件传输、服务调用、授权开关都有本地留痕。
+## 接入方式
 
-## 一条命令安装
+服务只在内部网桥 `backend` 上提供，MCP 端点是 `http://credential-proxy-gateway:7600/mcp`，**没有发布到宿主机端口**，局域网里访问不到。
 
-推荐的生产形态是本地 daemon + Streamable HTTP MCP endpoint：
-
-```bash
-cargo install --git https://github.com/LCYLYM/ssh-connector-mcp ssh-connector --locked
-ssh-connector --data-dir ~/.ssh-connector
-```
-
-打开 Web UI，初始化 vault 并添加主机：
-
-```text
-http://127.0.0.1:7600/
-```
-
-MCP endpoint：
-
-```text
-http://127.0.0.1:7600/mcp
-```
-
-## 接入 AI 客户端
-
-### Codex
-
-```bash
-codex mcp add ssh-connector --url http://127.0.0.1:7600/mcp
-```
-
-验证：
-
-```bash
-codex mcp get ssh-connector
-```
-
-### Claude Code
-
-```bash
-claude mcp add --transport http ssh-connector http://127.0.0.1:7600/mcp
-```
-
-如果你的 Claude Code 版本使用 JSON 配置，可以添加：
+任何支持 Streamable HTTP 的 MCP 客户端都按这个地址接：
 
 ```json
 {
   "mcpServers": {
-    "ssh-connector": {
+    "credential-proxy-gateway": {
       "type": "http",
-      "url": "http://127.0.0.1:7600/mcp"
+      "url": "http://credential-proxy-gateway:7600/mcp"
     }
   }
 }
 ```
 
-### OpenClaw
+在容器里接入：`docker network connect backend 你的容器名`。
+在容器里不要用 `127.0.0.1:7600` 或 `localhost:7600`——那指向容器自己。
 
-使用 OpenClaw MCP CLI：
+管理网页不直接暴露，由 `container-login-gateway` 以 `/vault/` 路径反向代理，需先通过统一登录。
 
-```bash
-openclaw mcp add ssh-connector \
-  --url http://127.0.0.1:7600/mcp \
-  --transport streamable-http
-openclaw mcp doctor ssh-connector --probe
-```
+**接口本身不做调用方身份鉴权，这是设计目标**：接入网桥的智能体可以直接使用全部工具，凭据保护靠加密存储与响应脱敏，不靠调用方身份。所以只把信任的容器接进这个网桥。
 
-该命令需要 OpenClaw 版本已提供 `openclaw mcp`。如果当前版本没有该子命令，
-请使用下方 JSON 配置，然后重启或 reload 实际持有 MCP client 的 OpenClaw 进程。
-详见 [OpenClaw 官方 MCP 文档](https://docs.openclaw.ai/cli/mcp)。
+> 上游提供的单机安装（`cargo install`、`--mcp-stdio`、只监听 `127.0.0.1`）本仓库不使用，容器化部署见下方。
+## 为智能体推荐的用法
 
-也可以写入 OpenClaw MCP 配置：
+网关在 MCP 握手下发使用指引，引导智能体走安全路径：
 
-```json
-{
-  "mcp": {
-    "servers": {
-      "ssh-connector": {
-        "url": "http://127.0.0.1:7600/mcp",
-        "transport": "streamable-http"
-      }
-    }
-  }
-}
-```
+1. 要调用外部服务：先 `gateway_list_cards`（或 `credential_registry`）看有哪些卡片、允许去哪些地址、注意事项是什么，再选工具发请求。
+2. 要操作设备：先 `host_list` 看设备与状态；一次性命令优先 `exec` 的 `argv`。
+3. 多行非交互任务用 `script`；编辑器、REPL、需要提示符的操作用 `session_open`。
+4. 远端文件用 SFTP 工具；大文件一律走路径型传输，不要把字节塞进参数。
+5. 不要要求查看已存凭据，除非人明确要在网页上看。
 
-### 通用 MCP 客户端
+注意事项里的内容（参数必填、字段大小写、结果字段含义）**只是提醒**，网关不会因为"不符合最佳实践"而拒绝调用；它只在违反安全边界时拒绝。
+## 管理网页
 
-```json
-{
-  "mcpServers": {
-    "ssh-connector": {
-      "type": "http",
-      "url": "http://127.0.0.1:7600/mcp"
-    }
-  }
-}
-```
+供人工操作（经 `container-login-gateway` 的 `/vault/` 反代访问，需先通过统一登录）：
 
-## 为 AI 推荐做过优化
-
-凭证统一代理网关 会在 MCP initialize 阶段返回 server instructions，引导代理走安全工具路径：
-
-```text
-When the user asks to operate SSH hosts, remote Linux machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands.
-```
-
-推荐代理行为：
-
-1. 先调用 `host_list` 发现可用主机和连接状态。
-2. 一次性命令优先使用 `exec argv`。
-3. 多行非交互任务使用 `script`。
-4. 编辑器、REPL、提示符、TUI 或需要状态的 shell 使用 `session_open`。
-5. 远端文件传输使用 SFTP 工具。
-6. 除非人类明确要在 Web UI 中查看，否则不要请求 reveal 存储凭据。
-
-## Web UI
-
-Web UI 面向人类操作者：
-
-- 初始化和解锁加密 vault；
-- 添加、编辑、连接、删除主机；
-- 配置跳板主机和环境变量；
-- 重新输入主密码后才可查看明文凭据；
-- 查看 live PTY 会话和审计日志。
-
-![凭证统一代理网关 add host dialog](docs/screenshots/add-host.png)
-
-![凭证统一代理网关 terminal workflow](docs/screenshots/terminal.png)
-
+- 初始化与解锁保险箱、打开或关闭 30 分钟临时管理开关；
+- 登记、编辑、连接、删除设备，配置跳板链与环境变量；
+- 维护服务卡片：允许的地址、凭据字段、注入方式、常用端点、注意事项；
+- 查看明文凭据（只有人工路径，且需登录态）；
+- 查看实时终端会话与审计记录。
 ## 安全模型
 
 ```text
-Human Web UI ── writes credentials ─┐
-                                   ├─ local AppState ─ SSH pool ─ remote hosts
-AI MCP tools ── host_id only ──────┘
+人工网页（统一登录）── 写入凭据、开授权 ─┐
+                                        ├─ 保险箱(加密) ─ 状态 ─ SSH / 上游服务
+智能体 MCP 工具 ── 只引用卡片与服务名 ──┘
 
-Encrypted Vault: passwords/private keys
-Audit Log: local operation trail
-Network: loopback by default; container deployment exposes the bridge on purpose
+凭据：加密落盘，只注入外发请求，永不进入模型上下文
+审计：设备、终端、文件、服务调用、授权开关全部留痕
+网络：默认只监听回环；容器部署刻意暴露到内部网桥，不做调用方鉴权
 ```
 
 安全属性：
 
-- **AI 侧凭据只写不可读**：MCP 可以创建/更新主机，但列表响应脱敏，永不包含密码或私钥。
-- **人类专用 reveal 路径**：`/api/hosts/{id}/reveal` 需要主密码，并刻意限定在 Web/API 侧。
-- **仅本机 HTTP**：daemon 绑定 loopback；远程使用应通过 SSH 端口转发，而不是改绑 `0.0.0.0`。
-- **优先 argv exec**：使用类型化参数数组来避免 shell 注入。
-- **TOFU 主机密钥**：首次连接记录 host key；后续不匹配会拒绝。
-
+- **智能体侧凭据只写不可读**：可以创建和修改服务与设备，但所有读取路径返回脱敏摘要。
+- **人工专用的明文查看路径**：只有网页能做，MCP 面上不存在对应工具。
+- **命令优先 argv**：类型化参数数组，避免拼 shell 造成注入。
+- **主机密钥首次信任**（TOFU）：后续不匹配即拒绝，尚未支持预置 known_hosts。
+- **凭据不经第三方转手**：出站代理由容器环境变量决定，卡片地址必须与免代理清单一起维护；卡片元数据会如实回显 `proxy_configured` 与 `bypass_matched`，让配置者自己判断。
 ## 工具列表
+
+共 33 个工具，按归属分五组。
+
+**服务卡片（新机制，推荐）**
 
 | 工具 | 作用 |
 | --- | --- |
-| `host_list` | 列出配置主机、脱敏元数据和连接状态。 |
-| `host_add`, `host_update`, `host_remove` | 管理主机条目，凭据加密存储。 |
-| `host_connect`, `host_disconnect` | 显式建立或断开 SSH transport，并记录 TOFU host key。 |
-| `exec` | 运行一次性 `argv`、`script` 或 `raw` 命令，返回 stdout/stderr/exit code。 |
-| `session_open`, `session_open_root` | 打开持久交互式 PTY 会话，可自动执行 `su -` 转 root。 |
-| `session_send_text`, `session_send_key` | 驱动 PTY 输入。 |
-| `session_screen`, `session_read` | 检查 PTY 屏幕或增量输出。 |
-| `session_resize`, `session_close`, `session_list` | 管理 live PTY 会话。 |
-| `sftp_list`, `sftp_get`, `sftp_put` | 通过 SFTP 传输 UTF-8 文本文件。 |
-| `sftp_download_file`, `sftp_upload_file` | 通过本地路径流式传输大体积二进制文件，支持父目录、覆盖控制、临时文件提交、失败清理和 SHA-256 校验。 |
-| `sftp_get_base64`, `sftp_put_base64` | 传输能安全放进 MCP 上下文的小体积二进制 payload。 |
+| `gateway_list_cards` | 列出卡片：名称、允许的地址、注入方式、凭据配了哪几个字段、**代理去向回显**。绝不返回值。 |
+| `gateway_register_card` | 新增或修改卡片（需管理开关） |
+| `gateway_remove_card` | 删除卡片（需管理开关） |
+| `gateway_request` | 按卡片发一次通用 HTTP 请求：方法、完整网址、请求头、请求体都由智能体决定 |
+| `gateway_call_mcp` | 按 MCP 协议调用一次远程服务：先握手，再调用指定工具 |
+| `gateway_run` | 按卡片跑一次本地命令，凭据作为环境变量注入子进程 |
 
+**服务注册（旧机制，待退役）**
+
+| 工具 | 作用 |
+| --- | --- |
+| `credential_registry` | 列出已注册服务与注意事项，凭据只显示是否配置 |
+| `credential_register` | 新增或修改注册、工具列表、注意事项并写入凭据（需管理开关） |
+| `credential_remove` | 删除注册（需管理开关） |
+| `credential_invoke` | 调用已注册服务的工具（`service_id` + `tool_name` + `arguments`） |
+
+**设备与连接**：`host_list`、`host_add`、`host_update`、`host_remove`、`host_connect`、`host_disconnect`
+**一次性命令**：`exec`（`argv` / `script` / `raw` 三种载荷）
+**交互终端**：`session_open`、`session_open_root`、`session_send_text`、`session_send_key`、`session_screen`、`session_read`、`session_resize`、`session_close`、`session_list`
+**文件传输**：`sftp_list`、`sftp_get`、`sftp_put`、`sftp_get_base64`、`sftp_put_base64`、`sftp_download_file`、`sftp_upload_file`
+
+入参形状约束：凡承载结构的字段都必须声明类型（对象或数组）。无类型字段会在调用方构造参数时退化成字符串，服务端取不到内容，导致首次调用必然失败——`arguments`、`tools` 都踩过这个坑。
 ## 主机凭据参数结构
 
 `host_add` 和 `host_update` 使用同一套主机参数。必填字段是 `alias`、
@@ -509,87 +453,60 @@ cargo test
 | `keepalive_secs` | `30` | SSH keepalive 间隔。 |
 | `max_channels_per_host` | `8` | 每台主机最大并发 exec channel 数。 |
 
-## Stdio 模式
-
-给只支持 stdio MCP 的客户端：
-
-```bash
-SSHC_MASTER_PASSWORD='your-master-password' \
-ssh-connector --mcp-stdio --master-password-env SSHC_MASTER_PASSWORD
-```
-
-或者：
-
-```bash
-printf '%s\n' 'your-master-password' | \
-  ssh-connector --mcp-stdio --master-password-stdin
-```
-
-vault 必须已经初始化。日常桌面使用通常更推荐 HTTP daemon，因为它同时提供 Web UI。
 
 ## 测试
 
-本地冒烟测试：
+单元测试随镜像构建一起跑（`cargo generate-lockfile && cargo test --locked && cargo build --release --locked`），覆盖命令切分与反斜杠保留、参数脱敏与编码形态替换、注入方式四种形式、地址通配只匹配一层、跳转与越界拒绝、卡片参数校验、UTF-8 边界裁剪等。
 
-```bash
-DATA_DIR="$(mktemp -d)"
-target/release/ssh-connector --data-dir "$DATA_DIR" &
-python3 tests/smoke_http_mcp.py http://127.0.0.1:7600
-```
+冒烟与端到端：
 
-可选的真实 E2E 只需要一台由 root 管理的测试机。脚本会创建一个临时用户和
-两个隔离的高端口 `sshd`，结束时自动删除：
+- `tests/smoke_http_mcp.py` 对运行中的服务做握手与工具面检查；
+- `tests/real_e2e.py` 需要一台由 root 管理的测试机，会自建临时用户与两个隔离的高端口 `sshd`，结束自动删除，覆盖保险箱锁与解锁、四种认证方式、跳板成功与失败、主机密钥不匹配、大体积二进制双向传输、创建与覆盖、临时文件清理、SHA-256 一致性，以及只能由人工解锁的明文查看边界。
 
-```bash
-export E2E_HOST='test-host.example'
-export E2E_BOOTSTRAP_KEY='/absolute/path/to/root-test-key'
-python3 tests/real_e2e.py
-```
-
-默认会双向传输 84 MiB。如果测试机出站带宽受限，可设置
-`E2E_SKIP_LARGE_DOWNLOAD=1`：上传仍验证 84 MiB，下载则使用 1 MiB 覆盖 fixture。
-
-真实 E2E 覆盖 vault 锁定/解锁、密码、加密私钥/passphrase、
-keyboard-interactive、跳板成功和失败、最终目标错误分类、TOFU mismatch、
-84 MiB 二进制传输、创建/覆盖、父目录创建、失败临时文件清理、SHA-256
-一致性，以及只能由主密码解锁的 Web reveal 边界。
-
-鉴权失败使用稳定错误码：`ssh_connect_failed`、`auth_failed`、
-`private_key_invalid`、`private_key_passphrase_required`、
-`private_key_passphrase_invalid`、`keyboard_interactive_failed`、
-`jump_failed_at_hop` 和 `host_key_mismatch`。跳板错误会附带脱敏后的
-`cause_code`、`hop_index`、`stage`；最终目标错误保留根因，不再误报成跳板失败。
-
+部署后建议按这四项确认本轮能力在线上生效：服务调用是否写入审计（含失败尝试）、卡片是否回显代理去向、目录列表是否返回 `total` / `truncated`、以及智能体首次调用带子参数包的服务能否一次成功。
 ## 已知限制
 
-- HTTP server 默认只监听 loopback。容器化部署显式改绑定后，同一网桥内的调用不做身份鉴权——**这是设计目标**：让接入网桥的智能体容器可以直接使用全部工具，凭据保护靠加密存储与响应脱敏，不靠调用方身份。
-- `sftp_get` 面向文本文件；二进制文件会以 lossy UTF-8 返回，并设置 invalid UTF-8 标志。
-- host key 使用 TOFU 首次信任；尚未导入预置 known_hosts。
-- 进程崩溃或机器突然断电仍可能留下隐藏 `.part`/`.backup`；普通工具错误会自动清理，且不会发布半个目标文件。
-
-## License
-
-MIT
-
+- **接口无调用方鉴权**：接入内部网桥的容器可以使用全部工具（含写入设备与服务注册）。这是刻意的设计取舍，靠网桥成员名单与审计承担风险。
+- **管理授权窗口内不可提前收回**：开关一旦打开，只有 30 分钟自然到期或人工显式关闭两种收权路径；未登录的只读请求不再影响授权。窗口期内同网桥容器可写入凭据，需要主动查看审计才能发现。
+- **两套服务登记并存**：新卡片机制不挑服务名、加服务不改代码；旧注册表仍把可用适配器硬编码成四个名字，属待收敛的旧路径。
+- **凭据经明文 http 时依赖免代理清单**：卡片地址若不在 `NO_PROXY` 内，请求会经容器配置的出站代理转发。代码不拦也不猜，只在卡片元数据里回显事实。
+- **`tools` 字段遇到无法识别的形状会退化为空**：可用性优先，不让一条坏记录让整个注册表读不出来；代价是那份提醒会静默消失，需要人工补回。
+- **主密码没有修改接口**：遗忘只能重置保险箱，会丢失已存凭据。
+- **主机密钥首次信任**：尚未支持导入预置 known_hosts。
+- **跳转凭据策略未经端到端实测**：清单外不带凭据目前只有代码与单元测试支撑，缺一个真实会重定向且在允许地址内的目标。
+- **响应截断只约束交给模型的体积**：未启用流式读取，进程内存仍会先吃下完整响应。
+- 进程崩溃或断电可能留下隐藏 `.part` / `.backup`；普通工具错误会自动清理，且不会发布半个目标文件。
 ## 本仓库的改动（相对上游）
 
-本分支为**容器化部署**做了以下改动，上游没有这些内容：
+上游是单机版 SSH 连接器；本仓库在它之上长出第二层——**凭据统一代理网关**。改动分两类。
+
+**容器化（不改语义）**
 
 | 改动 | 文件 | 说明 |
 | --- | --- | --- |
-| 监听地址可配置 | `src/daemon/mod.rs` | 新增环境变量 `SSH_CONNECTOR_BIND_ADDRESS`；**默认仍是 `127.0.0.1`** |
-| MCP 允许的 Host 可扩展 | `src/mcp/mod.rs` | 新增环境变量 `SSH_CONNECTOR_ALLOWED_HOSTS`；**追加**到 rmcp 默认回环白名单之后，不替换 |
-| 容器镜像 | `Dockerfile` | 两阶段构建（`rust:1.89` → `debian:bookworm-slim`），以非 root（uid 10001）运行 |
-| 镜像构建与发布 | `.github/workflows/container.yml` | 推送到 `ghcr.io/observe-life/credential-proxy-gateway`，支持 `latest`、tag 与短 SHA |
-| 编排示例 | `deploy/docker-compose.yml` | 接入外部自建网桥 `backend`，供其他容器按容器名访问 |
+| 监听地址可配置 | `src/daemon/mod.rs` | 新增 `SSH_CONNECTOR_BIND_ADDRESS`；**默认仍是回环** |
+| MCP 允许的 Host 可扩展 | `src/mcp/mod.rs` | 新增 `SSH_CONNECTOR_ALLOWED_HOSTS`；**追加**到库自带回环白名单之后，不替换 |
+| 容器镜像与发布 | `Dockerfile`、`.github/workflows/container.yml` | 两阶段构建（`rust:1.89` → `debian:bookworm-slim`），非 root（uid 10001）运行；推 `ghcr.io/observe-life/credential-proxy-gateway`，标签 `latest` / tag / 短 SHA |
+| 编排示例 | `deploy/docker-compose.yml` | 接入外部网桥 `backend`，按容器名访问 |
+| 会话失效可恢复 | `Cargo.toml` 的本地补丁 | 上游对已终止会话返回 500，会使标准客户端永久卡住；补丁让它返回 404 触发重新握手 |
+| 空闲回收可配 | `src/config.rs` | `SSH_CONNECTOR_MCP_IDLE_TIMEOUT_MINUTES`，5～1440 分钟 |
 
-### 为什么需要这些改动
+**网关层（新增能力）**
 
-- 上游把服务**强制绑定到 `127.0.0.1`**（`src/daemon/mod.rs`），并且明确不实现远程鉴权。因此在容器里运行时，只有容器自己能用，其他容器访问不到。
-- MCP 接口使用的 rmcp 库默认只接受 `localhost`、`127.0.0.1`、`::1` 三个 `Host` 头（防 DNS 重绑定攻击）。其他容器用容器名访问 `/mcp` 会返回 `403 Forbidden: Host header is not allowed`。
+| 改动 | 文件 | 说明 |
+| --- | --- | --- |
+| 服务卡片与三条执行路径 | `src/gateway.rs`、`src/mcp/mod.rs` | 通用 HTTP 请求、按 MCP 协议调用、本地命令；共用同一套地址校验、凭据注入与脱敏。加新服务只需加卡片 |
+| 安全边界硬化 | `src/gateway.rs` | 拒绝自带凭据明文、拒绝可改道请求头、通配地址只匹配一层子域、跳转逐跳判定且清单外不带凭据 |
+| 编码形态脱敏与响应上限 | `src/gateway.rs` | 明文、base64、百分号三种形态都替换；响应体截断 |
+| 服务注册与调用适配 | `src/services.rs` | 三种执行器映射远程 MCP / HTTP / 本地命令；并发闸门与同仓库串行闸门 |
+| 审计扩展到服务面 | `src/services.rs`、`src/mcp/mod.rs`、`src/daemon/mod.rs` | 服务调用、注册与卡片增删、授权开关全部留痕，失败与越界尝试也在内 |
+| 管理授权生命周期 | `src/web/mod.rs`、`src/vault/mod.rs` | 运行钥匙与主密码分离；未登录只读请求不再改动授权 |
+| 目录列表上下文保护 | `src/mcp/mod.rs` | `max_entries` 可调，返回 `total` / `truncated`，不静默丢弃 |
+| 管理网页 | `static/index.html`、`static/app.js`、`src/web/mod.rs` | 卡片表单、统一登录共享会话、服务间密钥核验 |
 
-这两个环境变量都保留了原本的安全默认值，只有在显式配置时才放开。
+### 为什么需要容器化那几个环境变量
 
+上游把服务强制绑定到回环，并且假定不需要远程鉴权，因此在容器里只有容器自己能访问；而 MCP 库默认只接受 `localhost`、`127.0.0.1`、`::1` 三种 `Host` 头（防 DNS 重绑定），其他容器按容器名访问会拿到 `403 Host header is not allowed`。这两个变量都保留了安全默认值，只在显式配置时放开。
 ## 容器化部署
 
 ### 1. 创建自建网桥
@@ -707,7 +624,7 @@ UTF-8：结果里 `had_invalid_utf8` 为 `true`，内容显示为乱码。
 
 - **主密码**只用于初始化、添加、修改、删除和查看明文凭据。
 - 主密码不会写入 `docker-compose.yml`、环境文件或 GitHub。
-- 管理操作完成后，服务会立即锁定管理功能。
+- 管理授权有独立的 30 分钟临时窗口，窗口内凭据可写；到期或人工显式关闭才收回。
 - **运行解密钥匙**保存在数据目录 `/app/data/runtime-key`，权限为 `600`。
 - 运行解密钥匙随 `/app/data` 数据卷迁移，容器重启后可恢复运行凭据。
 - MCP 可以使用已登记设备、按需建立 SSH 连接、断线后重新连接；MCP 不会返回私钥、密码或运行解密钥匙。
@@ -716,12 +633,13 @@ UTF-8：结果里 `had_invalid_utf8` 为 `true`，内容显示为乱码。
 
 管理授权的收回**只有两条路径**：30 分钟自然到期，或显式调用下面的锁定接口。未通过登录校验的网页请求只拒绝当次请求，**不会**改动授权状态——网页会话过期或别的容器做一次只读探测，都不该把人正开着的管理开关关掉。
 
-每一次授权开与关都写审计，便于事后追溯：`management_grant_open`、`management_grant_close`、`management_lock`。服务调用面同样留痕，失败的越界尝试也在内：`gateway_request` / `gateway_request_failed`、`gateway_call_mcp` / `_failed`、`gateway_run` / `_failed`、`credential_invoke` / `_failed`，以及卡片与服务的 `card_register` / `card_remove`、`service_register` / `service_remove`。审计里的地址与命令先抹凭据再限长，不落密钥。
+每一次授权开与关都写审计；服务调用、注册与卡片增删同样留痕。完整动作清单与三条记录约束见「审计与留痕」。
 
 管理锁定接口：
 
 ```bash
-curl -X POST http://127.0.0.1:7600/api/vault/lock-management
+# 在网关容器内执行（该接口同样受统一登录态保护）
+curl -X POST http://127.0.0.1:7600/vault/lock-management
 ```
 
 迁移时必须完整迁移 Docker 数据卷，而不能只复制 `vault.db`：
@@ -742,13 +660,36 @@ MCP 首次操作设备或发现连接断开时，连接器会在服务内部建�
 
 每台设备可以保存 `notes` 非敏感说明，例如远端 shell 类型、命令格式、编码方式和高风险权限提示。`host_list`、设备详情和管理界面可以返回这些说明；私钥、密码、口令和跳板机凭据不会返回。
 
+## 审计与留痕
+
+审计按天滚动写入 `audit/audit-YYYY-MM-DD.jsonl`，一行一个 JSON。当日线上实测出现的动作共 31 种：
+
+| 分组 | 动作 |
+| --- | --- |
+| 设备与连接 | `host_add`、`host_update`、`host_remove`、`host_connect`、`host_disconnect` |
+| 命令与终端 | `exec`、`pty_open`、`pty_close`、`pty_open_root_failed`、`pty_send_text`、`pty_send_key` |
+| 文件传输 | `sftp_list`、`sftp_get`、`sftp_put`、`sftp_download_file`、`sftp_upload_file` |
+| 服务调用（成功与失败成对） | `credential_invoke` / `credential_invoke_failed`、`gateway_request` / `gateway_request_failed`、`gateway_run` / `gateway_run_failed`、`gateway_call_mcp` / `gateway_call_mcp_failed` |
+| 注册与卡片增删 | `service_register`、`service_remove`、`card_register`、`card_remove` |
+| 管理授权 | `management_grant_open`、`management_grant_close` |
+| 人工查看明文 | `card_credential_reveal` |
+
+代码里还会在另一些分支写审计：保险箱初始化与解锁、显式关闭管理授权、设备明文查看、命令与终端打开失败、一次性凭据迁移导入、会话回收时间调整。
+
+三条约束：
+
+- **失败也留痕**：越界地址、自带凭据明文、自带改道头、参数不合形状，都会记下动作名、错误码与脱敏后的说明，便于发现有人在试探边界。
+- **不落密钥**：记录的网址、命令、工作目录与错误文本先按卡片凭据（含 base64 与百分号形态）抹掉，再截断到 240 字符。
+- **只记够复盘的信息**：终端输入只记字节数与"已脱敏"标记，不记内容；注册与卡片只记编号与注入方式，不记凭据字段值。
+
 ## 容器化后的安全须知
 
-- **MCP 接口与 Web API 都没有鉴权**（上游设计假定只在本机回环使用）。一旦通过网桥暴露，**同一网桥内的任何容器都能调用全部工具**，包括添加主机、在已配置主机上执行命令。只把你信任的容器接进该网桥。
-- `7600` 端口若发布到宿主机，局域网内其他设备也能打开管理界面。完成初始化后建议收回该端口映射，改为仅通过网桥或 SSH 隧道访问。
-- 主密码用于加密保险箱，程序不保存它；**本项目没有提供修改主密码的接口**，遗忘后只能重置保险箱（会丢失已保存的凭据）。
-- 数据卷 `/app/data` 保存保险箱、配置和审计日志，请自行备份。
-
+- **接口不做调用方鉴权，这是设计目标**：接入 `backend` 网桥的容器可以使用全部工具，包括登记设备、在已配置设备上执行命令、在授权窗口内写入服务与凭据。因此只把信任的容器接进这个网桥，并把审计当作事后追责手段。
+- **`7600` 端口当前没有发布到宿主机**，局域网访问不到；管理网页经统一登录网关反代。若将来要发布端口，请把它当作新增攻击面重新评估。
+- **免代理清单要与卡片地址一起维护**：出站代理由容器环境变量决定，代码不拦也不猜。卡片元数据会回显 `proxy_configured` 与 `bypass_matched`；若某张卡片有凭据、走明文 http、又不在免代理清单内，凭据会经代理明文转发。
+- **管理授权窗口内不会被提前收回**：只有 30 分钟到期或人工显式关闭两种收权路径；期间发生的写入要靠审计发现。
+- **主密码不可修改**：遗忘只能重置保险箱，会丢失已保存的凭据。程序不保存主密码。
+- **数据卷要整体备份**：`/app/data` 下的保险箱、`runtime-key`、`audit/` 三者缺一不可。
 ## License
 
 MIT
