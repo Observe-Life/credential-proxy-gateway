@@ -7,14 +7,14 @@ RUN cargo generate-lockfile && cargo test --locked && cargo build --release --lo
 ARG GH_VERSION=2.103.3
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
-    curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
-    curl -fsSL -o /tmp/gh.sum "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
     cd /tmp; \
+    curl -fsSL -O "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    curl -fsSL -o gh.sum "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"; \
     grep "gh_${GH_VERSION}_linux_${arch}.tar.gz" gh.sum | sha256sum -c -; \
-    tar -xzf gh.tgz; \
+    tar -xzf "gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
     mkdir /tmp/ghbin; \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /tmp/ghbin/gh; \
-    rm -rf /tmp/gh.tgz /tmp/gh.sum "/tmp/gh_${GH_VERSION}_linux_${arch}"
+    rm -rf "gh_${GH_VERSION}_linux_${arch}.tar.gz" gh.sum "/tmp/gh_${GH_VERSION}_linux_${arch}"
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
