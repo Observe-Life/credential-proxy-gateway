@@ -497,10 +497,24 @@ pub struct GatewayCallMcp {
 #[derive(Deserialize, JsonSchema)]
 pub struct GatewayRun {
     pub card_id: String,
-    pub command: String,
-    #[serde(default)] pub cwd: Option<String>,
-    #[serde(default)] pub timeout: Option<u64>,
+    /// 旧字段：按空格和引号切分、不经过 shell；含管道等 shell 语法会被拒绝并指路。与 argv/raw/script 互斥。
+    #[serde(default)]
+    pub command: Option<String>,
+    /// 数组逐词传参：程序内部转义，不经过 shell，简单命令首选。
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+    /// 多行脚本：落盘成临时文件后由 sh 执行。
+    #[serde(default)]
+    pub script: Option<String>,
+    /// 整条命令原样交给 sh -c：支持管道、&&、$变量、重定向。
+    #[serde(default)]
+    pub raw: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
+
 
 #[tool_router]
 impl McpServer {
@@ -557,14 +571,31 @@ impl McpServer {
         Ok(Json(CredentialResponse { result: out }))
     }
 
-    #[tool(description = "按服务卡片跑一次本地命令。卡片里的凭据会作为环境变量注入子进程，命令输出里出现的凭据同样会被抹掉，所以你看不到凭据的值，也不要把它写进命令。command 是整条命令行（支持单双引号），cwd 默认 /app/data/github（git 操作务必指向仓库目录），timeout 默认 120 秒、上限 10800 秒。")]
+    #[tool(description = "按服务卡片跑一次本地命令。凭据作为环境变量注入子进程，输出里出现的凭据会被抹掉，不要把凭据值写进命令。传参四选一：argv（字符串数组，程序负责转义，简单命令首选）；raw（整条命令原样交给 shell，支持管道、&&、$变量、重定向）；script（多行脚本，落盘后由 sh 执行）；command（旧字段：按空格和引号切分、不经过 shell，含管道等 shell 语法会被拒绝并提示改用 raw）。cwd 默认 /app/data/github，必须指向真实存在的目录，不再自动创建。timeout 默认 120 秒、上限 10800 秒。stdout 或 stderr 超过 64KB 时全文落盘到 /app/data/runs/，返回头尾各40行、省略行数与文件路径。")]
     async fn gateway_run(&self, Parameters(req): Parameters<GatewayRun>) -> Result<Json<CredentialResponse>, ErrorData> {
         let card = self.state.vault.get_service_card(&req.card_id).map_err(err_to_mcp)?;
         let cwd = req.cwd.unwrap_or_else(|| "/app/data/github".to_string());
-        let outcome = crate::gateway::execute_command(&card, &req.command, &cwd, req.timeout.unwrap_or(120)).await;
+        let audit_cmd = req
+            .command
+            .clone()
+            .or_else(|| req.raw.clone())
+            .or_else(|| req.script.clone())
+            .unwrap_or_else(|| req.argv.clone().map(|a| a.join(" ")).unwrap_or_default());
+        let mode = crate::gateway::resolve_exec_mode(
+            req.command.as_deref(),
+            req.argv.as_deref(),
+            req.script.as_deref(),
+            req.raw.as_deref(),
+        );
+        let outcome = match mode {
+            Ok(m) => {
+                crate::gateway::execute_command(&card, m, &cwd, req.timeout.unwrap_or(120)).await
+            }
+            Err(e) => Err(e),
+        };
         match &outcome {
-            Ok(v) => audit_call(&self.state, "gateway_run", &card, serde_json::json!({"card":req.card_id,"command":req.command,"cwd":cwd,"exit_code":v.get("exit_code")})),
-            Err(e) => audit_call(&self.state, "gateway_run_failed", &card, serde_json::json!({"card":req.card_id,"command":req.command,"cwd":cwd,"code":e.code.as_str(),"message":e.message})),
+            Ok(v) => audit_call(&self.state, "gateway_run", &card, serde_json::json!({"card":req.card_id,"command":audit_cmd,"cwd":cwd,"exit_code":v.get("exit_code")})),
+            Err(e) => audit_call(&self.state, "gateway_run_failed", &card, serde_json::json!({"card":req.card_id,"command":audit_cmd,"cwd":cwd,"code":e.code.as_str(),"message":e.message})),
         }
         let out = outcome.map_err(err_to_mcp)?;
         Ok(Json(CredentialResponse { result: out }))

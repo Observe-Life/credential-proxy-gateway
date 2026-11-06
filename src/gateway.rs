@@ -616,23 +616,218 @@ fn command_invokes_git(command: &str) -> bool {
         .any(|t| t.rsplit('/').next() == Some("git"))
 }
 
+// ===== gateway_run 三载荷 + 输出分流（2026-11-06）=====
+// 约束回顾：
+// - argv：数组逐词，程序负责转义，不经过 shell；
+// - raw：整条交给 sh -c，shell 语义完整；
+// - script：多行落盘后由 sh 执行；
+// - command：旧字段，语义冻结为“按空格和引号切分”，含 shell 语法时拒绝并指路。
+const MAX_INLINE_BYTES: usize = 64 * 1024;
+const HEAD_TAIL_LINES: usize = 40;
+const LINE_SLICE_CHARS: usize = 2000;
+
+fn runs_dir() -> String {
+    std::env::var("VAULT_RUNS_DIR").unwrap_or_else(|_| "/app/data/runs".into())
+}
+
+/// 本地命令的三种新传参 + 旧 command 的统一表示。
+#[derive(Debug, Clone)]
+pub enum ExecMode {
+    Legacy(String),
+    Argv(Vec<String>),
+    Raw(String),
+    Script(String),
+}
+
+/// 旧 command 通道不经过 shell；发现会改变执行结构的语法时提前拦下并指路，
+/// 避免管道、&&、重定向被当成普通参数传给程序造成静默错误。
+/// 变量 $VAR 不拦：旧通道按字面量处理是明示过的语义，想要展开请用 raw。
+fn shell_syntax_hint(command: &str) -> Option<String> {
+    const MARKS: [&str; 9] = ["$(", "&&", "||", ">>", "|", ";", "`", ">", "<"];
+    let mut found: Vec<&str> = Vec::new();
+    for m in MARKS {
+        if command.contains(m)
+            && !found.iter().any(|f| f.contains(m) || m.contains(f))
+        {
+            found.push(m);
+        }
+    }
+    if found.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "命令含 shell 语法（{}），而 command 字段按空格和引号切分、不经过 shell；请改用 raw 字段把整条命令交给 shell，或用 argv 数组逐词传参",
+        found.join(" ")
+    ))
+}
+
+/// 四选一：argv / raw / script / command（旧）。其余组合一律拒绝。
+pub fn resolve_exec_mode(
+    command: Option<&str>,
+    argv: Option<&[String]>,
+    script: Option<&str>,
+    raw: Option<&str>,
+) -> Result<ExecMode> {
+    let given = command.is_some() as usize
+        + argv.is_some() as usize
+        + script.is_some() as usize
+        + raw.is_some() as usize;
+    if given == 0 {
+        return Err(bad("需要提供 argv、raw、script 三选一（或旧字段 command）"));
+    }
+    if given > 1 {
+        return Err(bad("argv、raw、script、command 只能填一个"));
+    }
+    if let Some(a) = argv {
+        if a.is_empty() {
+            return Err(bad("argv 不能为空"));
+        }
+        return Ok(ExecMode::Argv(a.to_vec()));
+    }
+    if let Some(s) = script {
+        if s.trim().is_empty() {
+            return Err(bad("script 不能为空"));
+        }
+        return Ok(ExecMode::Script(s.to_string()));
+    }
+    if let Some(r) = raw {
+        if r.trim().is_empty() {
+            return Err(bad("raw 不能为空"));
+        }
+        return Ok(ExecMode::Raw(r.to_string()));
+    }
+    let c = command.unwrap_or_default().trim().to_string();
+    if c.is_empty() {
+        return Err(bad("command 不能为空"));
+    }
+    if let Some(hint) = shell_syntax_hint(&c) {
+        return Err(bad(&hint));
+    }
+    Ok(ExecMode::Legacy(c))
+}
+
+fn spill_to_file(text: &str, card_id: &str, tag: &str) -> Option<String> {
+    let dir = std::path::Path::new(&runs_dir());
+    std::fs::create_dir_all(dir).ok()?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let path = dir.join(format!("{card_id}_{tag}_{secs}.log"));
+    std::fs::write(&path, text).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// 超长行在返回窗口里截断，防止一行 JSON 占满返回；全文在落盘文件里。
+fn one_line(line: &str) -> String {
+    if line.chars().count() <= LINE_SLICE_CHARS {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(LINE_SLICE_CHARS).collect();
+    format!("{cut} …[本行过长已截断，全文见落盘文件]")
+}
+
+/// 输出超过字节阈值时：全文落盘（一个字不丢），返回头尾窗口 + 省略行数 + 文件路径。
+/// 按“行”切窗口，不按字节硬切，保证每行完整可解析。
+fn stream_window(text: &str, card_id: &str, tag: &str) -> (String, Option<String>, Option<u64>) {
+    if text.len() <= MAX_INLINE_BYTES {
+        return (text.to_string(), None, None);
+    }
+    let file = spill_to_file(text, card_id, tag);
+    let file_note = file
+        .as_ref()
+        .map(|p| format!("\n[完整输出已保存: {p}]"))
+        .unwrap_or_else(|| "\n[输出过大且落盘目录不可写，仅返回窗口]".to_string());
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let (body, omitted) = if total <= HEAD_TAIL_LINES * 2 {
+        (
+            lines.iter().map(|l| one_line(l)).collect::<Vec<_>>().join("\n"),
+            0u64,
+        )
+    } else {
+        let mut parts: Vec<String> = lines[..HEAD_TAIL_LINES]
+            .iter()
+            .map(|l| one_line(l))
+            .collect();
+        parts.push(format!(
+            "……中间省略 {} 行，全文见落盘文件……",
+            total - HEAD_TAIL_LINES * 2
+        ));
+        parts.extend(
+            lines[total - HEAD_TAIL_LINES..]
+                .iter()
+                .map(|l| one_line(l)),
+        );
+        (parts.join("\n"), (total - HEAD_TAIL_LINES * 2) as u64)
+    };
+    (format!("{body}{file_note}"), file, (omitted > 0).then_some(omitted))
+}
+
 /// 执行一次本地命令：凭据作为环境变量注入子进程，输出里的凭据抹掉。
+/// cwd 必须真实存在（不再自动创建，防止拼错名字后静默跑错地方）。
 pub async fn execute_command(
     card: &ServiceCard,
-    command: &str,
+    mode: ExecMode,
     cwd: &str,
     timeout: u64,
 ) -> Result<Value> {
-    reject_leaked_credential(&[command.to_string(), cwd.to_string()], &card.values())?;
-    let argv = crate::services::parse_command(command)?;
-    let mut cmd = tokio::process::Command::new(
-        argv.first().ok_or_else(|| bad("命令为空"))?,
-    );
-    cmd.args(&argv[1..]);
-    tokio::fs::create_dir_all(cwd)
-        .await
-        .map_err(|_| internal("工作目录不可用"))?;
-    cmd.current_dir(cwd);
+    let scanned = match &mode {
+        ExecMode::Legacy(c) | ExecMode::Raw(c) | ExecMode::Script(c) => c.clone(),
+        ExecMode::Argv(a) => a.join(" "),
+    };
+    reject_leaked_credential(&[scanned.clone(), cwd.to_string()], &card.values())?;
+    let cwd_path = std::path::Path::new(cwd);
+    if !cwd_path.is_dir() {
+        let mut siblings = String::from("不存在（不再自动创建，避免拼错名字后静默跑错地方）");
+        if let Some(parent) = cwd_path.parent() {
+            if let Ok(rd) = std::fs::read_dir(parent) {
+                let mut names: Vec<String> = rd
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                if !names.is_empty() {
+                    let show: Vec<String> = names.iter().take(20).cloned().collect();
+                    siblings = format!("不存在；同级目录有：{}", show.join("、"));
+                }
+            }
+        }
+        return Err(bad(&format!("工作目录 {cwd} {siblings}")));
+    }
+    let mut script_path: Option<std::path::PathBuf> = None;
+    let mut cmd = match &mode {
+        ExecMode::Argv(a) => {
+            let mut c = tokio::process::Command::new(&a[0]);
+            c.args(&a[1..]);
+            c
+        }
+        ExecMode::Raw(s) => {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c").arg(s);
+            c
+        }
+        ExecMode::Script(s) => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("vault-script-{stamp}.sh"));
+            std::fs::write(&path, s).map_err(|_| internal("脚本落盘失败"))?;
+            script_path = Some(path.clone());
+            let mut c = tokio::process::Command::new("sh");
+            c.arg(&path);
+            c
+        }
+        ExecMode::Legacy(cstr) => {
+            let argv = crate::services::parse_command(cstr)?;
+            let mut c = tokio::process::Command::new(argv.first().ok_or_else(|| bad("命令为空"))?);
+            c.args(&argv[1..]);
+            c
+        }
+    };
+    cmd.current_dir(cwd_path);
     // 凭据只以环境变量形式进入子进程，不进入命令行（否则会出现在进程列表里）。
     for (k, v) in &card.credentials {
         cmd.env(k, v);
@@ -644,7 +839,7 @@ pub async fn execute_command(
     // git 的默认配置属于机制，由程序兜住，不让调用方每次手写：
     // 目录信任与提交身份总是给；只有这张卡片带 GH_TOKEN 时才挂凭据助手，
     // 否则会去调用一个没有令牌的 gh，反而让调用方困惑。
-    if command_invokes_git(command) {
+    if command_invokes_git(&scanned) {
         let mut keys: Vec<(&str, &str)> = vec![
             ("safe.directory", "*"),
             ("user.name", "vault-connector"),
@@ -665,14 +860,37 @@ pub async fn execute_command(
         .await
         .map_err(|_| internal("命令超时"))?
         .map_err(|_| internal("命令执行失败"))?;
+    if let Some(p) = script_path {
+        let _ = std::fs::remove_file(p);
+    }
     let values = card.values();
-    Ok(json!({
+    // 抹除先于落盘：落盘文件里同样不允许出现凭据明文。
+    let stdout_s = scrub_all(&String::from_utf8_lossy(&out.stdout), &values);
+    let stderr_s = scrub_all(&String::from_utf8_lossy(&out.stderr), &values);
+    let (so, so_file, so_omitted) = stream_window(&stdout_s, &card.id, "stdout");
+    let (se, se_file, se_omitted) = stream_window(&stderr_s, &card.id, "stderr");
+    let mut v = json!({
         "exit_code": out.status.code(),
-        "stdout": scrub_all(&String::from_utf8_lossy(&out.stdout), &values),
-        "stderr": scrub_all(&String::from_utf8_lossy(&out.stderr), &values),
-    }))
+        "stdout": so,
+        "stderr": se,
+    });
+    if so_file.is_some() || se_file.is_some() {
+        v["truncated"] = json!(true);
+        if let Some(f) = so_file {
+            v["stdout_file"] = json!(f);
+        }
+        if let Some(f) = se_file {
+            v["stderr_file"] = json!(f);
+        }
+        if let Some(n) = so_omitted {
+            v["stdout_omitted_lines"] = json!(n);
+        }
+        if let Some(n) = se_omitted {
+            v["stderr_omitted_lines"] = json!(n);
+        }
+    }
+    Ok(v)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +908,72 @@ mod tests {
             timeout: None,
         }
     }
+    #[test]
+    fn shell_syntax_hint_points_to_raw() {
+        assert!(shell_syntax_hint("gh --version | head -1").is_some());
+        assert!(shell_syntax_hint("git status && git push").is_some());
+        assert!(shell_syntax_hint("echo hi > /tmp/x").is_some());
+        assert!(shell_syntax_hint("sh -c 'git log | wc -l'").is_some());
+        assert!(shell_syntax_hint("gh repo list --limit 3").is_none());
+        assert!(shell_syntax_hint("git log --oneline -3").is_none());
+        // 变量不拦：旧通道按字面量处理是明示语义
+        assert!(shell_syntax_hint("echo $HOME").is_none());
+    }
+
+    #[test]
+    fn resolve_mode_enforces_exactly_one_payload() {
+        let one = vec!["ls".to_string()];
+        let two = vec!["gh".to_string(), "--version".to_string()];
+        assert!(resolve_exec_mode(None, None, None, None).is_err());
+        assert!(resolve_exec_mode(Some("ls"), Some(&one), None, None).is_err());
+        assert!(
+            resolve_exec_mode(Some("ls | wc"), None, None, None).is_err(),
+            "旧字段含管道应被拒绝并指路"
+        );
+        assert!(matches!(
+            resolve_exec_mode(Some("ls -la"), None, None, None),
+            Ok(ExecMode::Legacy(_))
+        ));
+        assert!(matches!(
+            resolve_exec_mode(None, Some(&two), None, None),
+            Ok(ExecMode::Argv(_))
+        ));
+        assert!(matches!(
+            resolve_exec_mode(None, None, None, Some("ls | wc")),
+            Ok(ExecMode::Raw(_))
+        ));
+        assert!(matches!(
+            resolve_exec_mode(None, None, Some("echo hi"), None),
+            Ok(ExecMode::Script(_))
+        ));
+    }
+
+    #[test]
+    fn window_keeps_head_tail_and_spills_rest() {
+        let big: String = (0..20_000).map(|i| format!("line-{i}\n")).collect();
+        let (inline, file, omitted) = stream_window(&big, "testcard", "stdout");
+        assert!(inline.contains("line-0"));
+        assert!(inline.contains("line-19999"));
+        assert_eq!(omitted, Some(20_000 - 80));
+        // 落盘目录不可写的环境（非 root 本地测试）里 file 为 None；可写时必须给出路径
+        if file.is_some() {
+            assert!(inline.contains("完整输出已保存"));
+        }
+        let (inline2, f2, o2) = stream_window("ok", "testcard", "stdout");
+        assert_eq!(inline2, "ok");
+        assert!(f2.is_none());
+        assert!(o2.is_none());
+    }
+
+    #[test]
+    fn long_lines_are_clipped_in_window() {
+        let long = "x".repeat(100_000);
+        let big = format!("{long}\ntail\n");
+        let (inline, _, _) = stream_window(&big, "testcard", "stdout");
+        assert!(inline.chars().count() < 10_000);
+        assert!(inline.contains("本行过长已截断"));
+    }
+
 
     #[test]
     fn detects_git_invocation_beyond_first_word() {
