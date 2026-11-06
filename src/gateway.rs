@@ -707,7 +707,8 @@ pub fn resolve_exec_mode(
 }
 
 fn spill_to_file(text: &str, card_id: &str, tag: &str) -> Option<String> {
-    let dir = std::path::Path::new(&runs_dir());
+    let runs = runs_dir();
+    let dir = std::path::Path::new(&runs);
     std::fs::create_dir_all(dir).ok()?;
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
